@@ -7,6 +7,7 @@ import json
 import logging
 from pathlib import Path
 
+from .calibration import check_offsets
 from .io import load_cube, load_metadata
 from .radiometry import apply_radiometric_correction, band_summary, validity_masks
 
@@ -49,6 +50,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="linear",
         help="Gain/offset formula (default: L = gain*DN + offset)",
     )
+    p.add_argument(
+        "--keep-metadata-offsets",
+        action="store_true",
+        help="Report but do not replace offsets that fail the consistency check",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -82,8 +88,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # 2. Invalid pixels + radiometric correction (before any band selection)
     valid, saturated = validity_masks(cube_dn, tuple(args.nodata))
+    bands, offset_checks = check_offsets(
+        cube_dn, bands, valid, args.convention, repair=not args.keep_metadata_offsets
+    )
     corrected = apply_radiometric_correction(cube_dn, bands, valid, args.convention)
-    summary = band_summary(cube_dn, corrected, bands, valid, saturated)
+    summary = band_summary(cube_dn, corrected, bands, valid, saturated, offset_checks)
     (args.output_dir / "band_summary.json").write_text(json.dumps(summary, indent=2))
     log.info("Wrote %s", args.output_dir / "band_summary.json")
 

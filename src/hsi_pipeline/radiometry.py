@@ -20,11 +20,14 @@ Invalid pixels:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
 from .io import BandInfo
+
+if TYPE_CHECKING:  # calibration imports this module, so import for typing only
+    from .calibration import OffsetCheck
 
 SATURATION_DN = 255
 
@@ -42,6 +45,34 @@ def validity_masks(
     valid = ~np.isin(cube, nodata_values)
     saturated = cube == SATURATION_DN
     return valid, saturated
+
+
+def correct_dn(
+    dn: np.ndarray | float,
+    gain: np.ndarray | float,
+    offset: np.ndarray | float,
+    convention: Convention = "linear",
+) -> np.ndarray | float:
+    """Apply the gain/offset formula elementwise (shapes broadcast).
+
+    Args:
+        dn: Raw digital number(s).
+        gain: Multiplicative coefficient(s).
+        offset: Additive coefficient(s), in corrected units for ``"linear"`` and
+            in DN for ``"subtract_offset"``.
+        convention: Which formula to apply (see module docstring).
+
+    Returns:
+        Corrected value(s), same broadcast shape as the inputs.
+
+    Raises:
+        ValueError: If ``convention`` is unknown.
+    """
+    if convention == "linear":
+        return gain * dn + offset
+    if convention == "subtract_offset":
+        return gain * (dn - offset)
+    raise ValueError(f"Unknown convention: {convention!r}")
 
 
 def apply_radiometric_correction(
@@ -67,12 +98,7 @@ def apply_radiometric_correction(
     out = np.empty(cube.shape, dtype=np.float32)
     for b in bands:
         dn = cube[b.index].astype(np.float32)
-        if convention == "linear":
-            out[b.index] = b.gain * dn + b.offset
-        elif convention == "subtract_offset":
-            out[b.index] = b.gain * (dn - b.offset)
-        else:
-            raise ValueError(f"Unknown convention: {convention!r}")
+        out[b.index] = correct_dn(dn, b.gain, b.offset, convention)
 
     if valid is not None:
         out[~valid] = np.nan
@@ -85,10 +111,24 @@ def band_summary(
     bands: list[BandInfo],
     valid: np.ndarray,
     saturated: np.ndarray,
+    offset_checks: list[OffsetCheck] | None = None,
 ) -> list[dict]:
-    """Per-band diagnostics used to sanity-check loading and correction."""
+    """Per-band diagnostics used to sanity-check loading and correction.
+
+    Args:
+        cube_dn: ``(n_bands, H, W)`` uint8 raw DN.
+        corrected: ``(n_bands, H, W)`` float32 corrected values, NaN at no-data.
+        bands: Band metadata as used for the correction (``offset`` is the applied one).
+        valid: ``(n_bands, H, W)`` bool, False for no-data pixels.
+        saturated: ``(n_bands, H, W)`` bool, True where DN == 255.
+        offset_checks: Optional per-band ``calibration.OffsetCheck`` results to merge in.
+
+    Returns:
+        One JSON-serialisable dict per band, in cube order.
+    """
+    checks = offset_checks or [None] * len(bands)
     rows = []
-    for b in bands:
+    for b, check in zip(bands, checks, strict=True):
         i = b.index
         vals = corrected[i][valid[i]]
         rows.append(
@@ -106,4 +146,11 @@ def band_summary(
                 "corrected_std": float(vals.std()) if vals.size else None,
             }
         )
+        if check is not None:
+            rows[-1] |= {
+                "offset_metadata": check.offset_metadata,
+                "offset_z": round(check.offset_z, 2),
+                "offset_repaired": check.repaired,
+                "continuity_residual": round(check.continuity_residual, 4),
+            }
     return rows
