@@ -1,0 +1,82 @@
+# Hyperspectral Image Processing Pipeline
+
+Processes a 48-band, 2048 × 2048, 8-bit hyperspectral capture into a
+radiometrically corrected, co-registered RGB image and a binary cloud mask,
+and reports co-registration accuracy between the selected RGB bands.
+
+## Quick start
+
+```bash
+python3.13 -m venv .venv && source .venv/bin/activate
+pip install -e .            # add ".[dev]" for tests, ".[viz]" for plots
+hsi-pipeline --input-dir inputs --output-dir outputs
+```
+
+Run the tests with `pytest`. To try the pipeline without the real data:
+
+```bash
+python tools/make_synthetic.py --out synthetic_inputs
+hsi-pipeline --input-dir synthetic_inputs --output-dir outputs_synthetic
+```
+
+The run is deterministic: no random state is used in the pipeline, and the
+synthetic generator is seeded.
+
+## Outputs
+
+| File | Description |
+|---|---|
+| `rgb_image.tif` | TODO |
+| `cloud_mask.tif` | uint8, same shape as the RGB image, 1 = cloud, 0 = not cloud. TODO |
+| `registration_stats.json` | TODO |
+| `band_summary.json` | Per-band DN range, valid/saturated fractions, corrected mean/std |
+
+## Method
+
+### 1. Loading and metadata
+- Band files are paired with `band_metadata.json` entries by filename when the
+  metadata names them, otherwise by natural-sort file order (the counts must match).
+- The cube is ordered by ascending wavelength.
+- Headerless files must be exactly 2048 × 2048 bytes. Any other size raises an
+  error rather than guessing a header offset.
+- TODO: describe the actual input format once inspected.
+
+### 2. Radiometric correction
+- Corrected value `L = gain · DN + offset`, computed per band in float32
+  **before** any band selection or combination.
+- TODO: confirm the convention against the metadata. `--convention subtract_offset`
+  gives `L = gain · (DN − offset)` instead.
+
+### 3. Invalid pixels
+- DN = 0 is treated as no-data (configurable with `--nodata`) and becomes NaN
+  after correction.
+- DN = 255 is flagged as saturated. It stays in the image but is excluded from
+  SNR and registration statistics.
+- TODO: describe how NaNs are handled in the RGB and cloud mask outputs.
+
+### 4. Co-registration
+TODO
+
+### 5. RGB band selection (SNR)
+TODO
+
+### 6. Cloud mask
+TODO
+
+### 7. Ship detection (optional)
+TODO
+
+## Assumptions
+- The gain/offset convention is linear (see above).
+- DN = 0 is fill, not real signal.
+- TODO
+
+## Limitations
+- TODO
+
+## Project layout
+```
+src/hsi_pipeline/   io.py (loading), radiometry.py (correction, validity), cli.py (entry point)
+tools/              make_synthetic.py (test data with known per-band shifts)
+tests/              unit tests
+```
