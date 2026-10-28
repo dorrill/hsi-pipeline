@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+from scipy import ndimage
 
 from .io import BandInfo
 
@@ -30,6 +31,11 @@ if TYPE_CHECKING:  # calibration imports this module, so import for typing only
     from .calibration import OffsetCheck
 
 SATURATION_DN = 255
+
+#: Running-median window (columns) separating column stripes from scene content.
+#: The stripes are single columns; 15 is wide enough for the running median to
+#: ignore them and narrow enough to follow the column-to-column scene profile.
+STRIPE_WINDOW_COLUMNS = 15
 
 Convention = Literal["linear", "subtract_offset"]
 
@@ -103,6 +109,35 @@ def apply_radiometric_correction(
     if valid is not None:
         out[~valid] = np.nan
     return out
+
+
+def destripe_columns(cube: np.ndarray) -> np.ndarray:
+    """Remove column fixed-pattern noise from each band, in place.
+
+    The capture has single-column stripes of ~2 DN (twice the random noise),
+    shared by all bands (r ~ 0.91), i.e. a detector-column offset. For each band
+    the stripe pattern is the column-median profile minus its running median over
+    ``STRIPE_WINDOW_COLUMNS`` columns; the pattern is subtracted from every row.
+    Medians over all rows make the estimate insensitive to scene content, and
+    scene structure wider than the window is left untouched (so is any banding
+    wider than the window).
+
+    Args:
+        cube: ``(n_bands, H, W)`` float32 corrected values, NaN at no-data.
+            Modified in place.
+
+    Returns:
+        ``(n_bands,)`` float64 standard deviation of the removed pattern per
+        band, in corrected units.
+    """
+    amplitude = np.empty(cube.shape[0])
+    for i in range(cube.shape[0]):
+        profile = np.nanmedian(cube[i], axis=0)
+        profile = np.where(np.isfinite(profile), profile, np.nanmedian(profile))
+        pattern = profile - ndimage.median_filter(profile, STRIPE_WINDOW_COLUMNS, mode="nearest")
+        cube[i] -= pattern[None, :].astype(cube.dtype)
+        amplitude[i] = pattern.std()
+    return amplitude
 
 
 def band_summary(
