@@ -29,7 +29,8 @@ synthetic generator is seeded. On the challenge data a run takes ~2 min and
 |---|---|
 | `rgb_image.tif` | uint8 (H, W, 3) display composite of the registered R, G, B bands; 0 = no-data in any channel (see §5) |
 | `band_selection.json` | Per-band noise, contrast and SNR, the colour windows, and the chosen bands |
-| `cloud_mask.tif` | uint8, same shape as the RGB image, 1 = cloud, 0 = not cloud. TODO |
+| `cloud_mask.tif` | uint8 (H, W) on the same grid as `rgb_image.tif`: 1 = cloud, 0 = clear **or no-data** (no-data = 0 in `rgb_image.tif`) |
+| `cloud_stats.json` | Bands used, the thresholds found on the data, cloud fraction and object count |
 | `registration_stats.json` | Per band: coarse shift, field range, tiles used per pass, spline smoothing, residual misregistration after warping, blocked cross-validation error of the field; and `rgb`: misregistration measured between each pair of RGB bands (see §4) |
 | `band_summary.json` | Per-band DN range, valid/saturated fractions, corrected mean/std, offset check, removed stripe amplitude |
 
@@ -101,7 +102,8 @@ recorded as `stripe_amplitude`; `--no-destripe` skips the step.
   With the green band (27) as reference this removes up to ~75 rows at the top
   for bands 45–80 and up to ~45 rows at the bottom for bands 1–8. The RGB image
   is valid in 97.5 % of the frame.
-- TODO: describe how NaNs are handled in the RGB and cloud mask outputs.
+- In the outputs, no-data is 0 in all three channels of `rgb_image.tif`, and 0
+  (not cloud) in `cloud_mask.tif`; the joint no-data area is the same in both.
 
 ### 4. Co-registration (`registration.py`)
 
@@ -238,8 +240,51 @@ either the SNR or the display stretch.
 **Composite**: the three registered bands, each stretched linearly from its
 1st to 99th percentile onto 1–255; 0 marks pixels invalid in any channel.
 
-### 6. Cloud mask
-TODO
+This balances the scene *average* to grey. Because the land here is redder than
+the clouds, the clouds come out slightly cyan. A white balance on the cloud mask
+(clouds are spectrally flat) was tried and not kept: it made the clouds neutral
+but turned the land magenta and the water purple, and clipped 8 % of the red
+channel. Clouds sit above most of the hazy atmosphere while the surface signal
+passes through all of it, so a cloud-based white point does not suit the surface.
+Natural colour would need atmospheric correction, which the metadata does not
+support.
+
+### 6. Cloud mask (`cloud.py`)
+
+There is no NIR or SWIR, so the usual tests (bright NIR, SWIR cirrus band) are
+unavailable. Two visible-range facts remain:
+
+- clouds are much brighter than the water they lie over;
+- clouds are spectrally flat in reflectance, so their radiance follows the solar
+  spectrum, while every land surface here (vegetation's red edge, soil, roofs,
+  sand) gets relatively brighter towards the longest band, 729 nm.
+
+Radiances add, so every mixture of water and cloud (thin cloud, cloud edges)
+lies on one straight line in the plane L(729) vs L(556), the *cloud line*; land
+lies above it. On the registered green (27) and 729 nm (80) bands, after a 3×3
+mean (single-pixel SNR is ~6):
+
+1. **Brightness**: green radiance more than 5σ above the water mode, where σ is
+   the water cluster's noise measured on its dark side (free of cloud and
+   land). Water noise alone passes with probability ~3·10⁻⁷. Here: mode 69.9,
+   σ 1.19, threshold 75.8.
+2. **Spectral shape**: the *red-edge excess* is the height above the cloud line,
+   fitted to the lower envelope of the bright pixels (slope 0.954). Among bright
+   pixels its histogram is bimodal (cloud ≈ +1, land ≈ +4). The threshold is the
+   minimum of the smoothed histogram between the modes (2.09), so it comes from
+   the data. Otsu's method was tried first and put the split at 3.0, inside the
+   land mode, because it is biased towards the larger class. 90 % of cloud
+   pixels lie below 1.6; 90 % of airfield and beach pixels lie above 2.4.
+3. **Shape**: an opening with a 7 px disk removes features up to ~4 px wide
+   (beach strip, roof edges, piers); objects under 100 px are dropped; holes are
+   filled; a 2 px buffer covers mixed edge pixels and the small cloud parallax
+   (clouds sit above the ground the bands were registered to).
+
+Result: 4.2 % of the valid frame, 83 objects (`figures/cloud_mask_overlay.png`
+from `tools/make_figures.py`). The tests build a synthetic scene from the same
+physics (water, red-edge land, soft clouds mixed linearly with water, and
+cloud-coloured lines and blobs) and check that definite cloud is all found, and
+that land, thin or tiny decoys, and water beyond the buffer are not.
 
 ### 7. Ship detection (optional)
 TODO
@@ -278,6 +323,15 @@ TODO
   over water) are not corrected.
 - Each colour uses one band. Averaging neighbouring bands would raise the SNR
   further, at the cost of spectral purity and an extra registration step.
+- Cloud mask: bright, spectrally grey man-made surfaces of cloud-like size
+  (a few white roofs, the Shelter Island marina) are false alarms; the faintest
+  haze at cloud margins is missed (below the 5σ brightness test). Thin cloud over
+  land is harder than over water, because the land below raises the red-edge
+  excess; in this scene the clouds are over the ocean. Each band's response
+  drifts across the swath (−2 to +3.7 % per 1000 columns on open water, measured
+  per band; 729 nm drifts more than 556 nm), which slightly lowers the excess
+  towards the left of the frame.
+- No cloud-shadow mask.
 - TODO
 
 ## Project layout
@@ -285,7 +339,9 @@ TODO
 src/hsi_pipeline/   io.py (loading), radiometry.py (correction, validity, destriping),
                     calibration.py (offset consistency check),
                     registration.py (co-registration and its evaluation),
-                    rgb.py (SNR, band choice, composite), cli.py (entry point)
-tools/              make_synthetic.py (test data with known per-band shifts)
+                    rgb.py (SNR, band choice, composite), cloud.py (cloud mask),
+                    cli.py (entry point)
+tools/              make_figures.py (summary figures, needs the viz extra)
+                    make_synthetic.py (test data with known per-band shifts)
 tests/              unit tests
 ```

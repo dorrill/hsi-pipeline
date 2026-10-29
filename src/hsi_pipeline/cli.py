@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .calibration import check_offsets
+from .cloud import cloud_mask
 from .io import BandInfo, load_cube, load_metadata, write_tiff
 from .radiometry import (
     apply_radiometric_correction,
@@ -263,7 +264,29 @@ def main(argv: list[str] | None = None) -> int:
             pair, r["median_px"], r["p95_px"], r["n_tiles"],
         )  # fmt: skip
 
-    # RGB composite on the registered grid
+    # 5. Cloud mask on the registered grid, from the green band and the longest
+    #    band (the closest the capture gets to NIR).
+    red_edge = int(np.argmax([b.wavelength_nm for b in bands]))
+    green = chosen["G"]
+    mask_valid = valid[[chosen["R"], green, chosen["B"], red_edge]].all(axis=0)
+    mask, cloud = cloud_mask(corrected[green], corrected[red_edge], mask_valid)
+    write_tiff(args.output_dir / "cloud_mask.tif", mask)
+    cloud_report = {
+        "bands": {"green": bands[green].band_id, "red_edge": bands[red_edge].band_id},
+        **{k: round(v, 4) if isinstance(v, float) else v for k, v in vars(cloud).items()},
+        "no_data_pixels": int((~mask_valid).sum()),
+    }
+    (args.output_dir / "cloud_stats.json").write_text(json.dumps(cloud_report, indent=2))
+    log.info(
+        "Wrote %s: %.1f %% cloud, %d objects (excess threshold %.2f)",
+        args.output_dir / "cloud_mask.tif",
+        100 * cloud.cloud_fraction,
+        cloud.n_objects,
+        cloud.excess_threshold,
+    )
+
+    # RGB composite (per-channel percentile stretch; see README for why a white
+    # balance on the cloud mask was tried and not kept)
     rgb, rgb_valid = rgb_composite(corrected, valid, chosen)
     write_tiff(args.output_dir / "rgb_image.tif", rgb, photometric="rgb")
     log.info(
@@ -272,7 +295,6 @@ def main(argv: list[str] | None = None) -> int:
         100 * rgb_valid.mean(),
     )
 
-    # 5. Cloud mask                 -> cloud_mask.tif            (TODO)
     # 6. Optional ship detection    -> ships.json                (TODO)
     return 0
 

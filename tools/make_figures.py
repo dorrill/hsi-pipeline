@@ -216,6 +216,32 @@ def offset_figure(summary: list[dict], out: Path) -> None:
     plt.close(fig)
 
 
+def cloud_figure(rgb: np.ndarray, mask: np.ndarray, stats: dict, out: Path) -> None:
+    """Cloud mask outline on the RGB composite, full frame and crops."""
+    crops = [
+        ("Cumulus field", slice(900, 1400), slice(0, 500)),
+        ("Airfield and Point Loma", slice(250, 762), slice(450, 962)),
+        ("Clouds near the coast", slice(0, 500), slice(0, 500)),
+    ]
+    fig, axes = plt.subplots(1, 4, figsize=(28, 7.6))
+    axes[0].imshow(rgb[::2, ::2])
+    axes[0].contour(mask[::2, ::2], [0.5], colors="yellow", linewidths=0.7)
+    axes[0].set_title(
+        f"cloud_mask.tif outline: {100 * stats['cloud_fraction']:.1f} % cloud, "
+        f"{stats['n_objects']} objects"
+    )
+    for ax, (title, r, c) in zip(axes[1:], crops, strict=True):
+        ax.imshow(rgb[r, c], interpolation="nearest")
+        ax.contour(mask[r, c], [0.5], colors="yellow", linewidths=1)
+        ax.set_title(f"{title} (rows {r.start}-{r.stop}, cols {c.start}-{c.stop})")
+    for ax in axes:
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.tight_layout()
+    fig.savefig(out / "cloud_mask_overlay.png", dpi=80)
+    plt.close(fig)
+
+
 def main() -> None:
     """Write the summary figures to ``<output-dir>/figures``."""
     ap = argparse.ArgumentParser(description=__doc__)
@@ -229,9 +255,12 @@ def main() -> None:
     reg = json.loads((args.output_dir / "registration_stats.json").read_text())
     summary = json.loads((args.output_dir / "band_summary.json").read_text())
     rgb = tifffile.imread(args.output_dir / "rgb_image.tif")
+    mask = tifffile.imread(args.output_dir / "cloud_mask.tif")
+    cloud_stats = json.loads((args.output_dir / "cloud_stats.json").read_text())
 
     snr_figure(sel, summary, out)
     rgb_figures(rgb, sel, out)
+    cloud_figure(rgb, mask, cloud_stats, out)
     shift_vs_band_figure(reg, out)
     offset_figure(summary, out)
     registration_figures(args.input_dir, sel, reg, out)
