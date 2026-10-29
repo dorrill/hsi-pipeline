@@ -5,59 +5,56 @@ import json
 import numpy as np
 import pytest
 
-from hsi_pipeline.io import load_cube, load_metadata, natural_key, read_band
+from hsi_pipeline.io import load_cube, load_metadata, read_band
 from hsi_pipeline.radiometry import apply_radiometric_correction, validity_masks
 
 SHAPE = (8, 8)
 
 
-def _write_bands(tmp_path, n=3):
-    for i in range(n):
-        np.full(SHAPE, 10 * (i + 1), np.uint8).tofile(tmp_path / f"band_{i + 1}.raw")
-
-
-def test_natural_sort():
-    """band_10 sorts after band_2, unlike plain lexicographic order."""
-    names = ["band_10.raw", "band_2.raw", "band_1.raw"]
-    assert sorted(names, key=natural_key) == ["band_1.raw", "band_2.raw", "band_10.raw"]
-
-
-@pytest.mark.parametrize("layout", ["list", "bands_key", "mapping", "parallel"])
-def test_metadata_layouts(tmp_path, layout):
-    """All supported JSON layouts parse to the same spectrally sorted bands."""
-    _write_bands(tmp_path)
-    wl, g, o = [700.0, 500.0, 600.0], [1.0, 2.0, 3.0], [0.1, 0.2, 0.3]
-    entries = [{"wavelength": w, "gain": a, "offset": b} for w, a, b in zip(wl, g, o, strict=True)]
-    raw = {
-        "list": entries,
-        "bands_key": {"bands": entries},
-        "mapping": {f"b{i}": e for i, e in enumerate(entries)},
-        "parallel": {"wavelength": wl, "gain": g, "offset": o},
-    }[layout]
-    (tmp_path / "band_metadata.json").write_text(json.dumps(raw))
-
-    bands = load_metadata(tmp_path / "band_metadata.json")
-    assert [b.wavelength_nm for b in bands] == [500.0, 600.0, 700.0]  # sorted spectrally
-    assert [b.index for b in bands] == [0, 1, 2]
-    assert bands[0].path.name == "band_2.raw"  # paired by file order
-
-
-def test_challenge_layout_matches_by_band_number(tmp_path):
-    """Keys '1','2','20' with files b1/b2/b20.raw; band 20 has the shortest wavelength."""
-    for n in (1, 2, 20):
-        np.full(SHAPE, n, np.uint8).tofile(tmp_path / f"b{n}.raw")
-    meta = {
-        "1": {"wavelength": 600, "gain": 1, "offset": 0},
-        "2": {"wavelength": 650, "gain": 1, "offset": 0},
-        "20": {"wavelength": 480, "gain": 1, "offset": 0},
-    }
+def _write_challenge_layout(tmp_path, meta):
+    """Write ``band_metadata.json`` and a constant ``b<n>.raw`` (DN = 10 * n) per key."""
+    for key in meta:
+        np.full(SHAPE, 10 * int(key), np.uint8).tofile(tmp_path / f"b{key}.raw")
     (tmp_path / "band_metadata.json").write_text(json.dumps(meta))
+
+
+def test_pairs_by_band_number_and_sorts_by_wavelength(tmp_path):
+    """Keys '1','2','20' pair with b1/b2/b20.raw; band 20 has the shortest wavelength."""
+    _write_challenge_layout(
+        tmp_path,
+        {
+            "1": {"wavelength": 600, "gain": 1, "offset": 0},
+            "2": {"wavelength": 650, "gain": 1, "offset": 0},
+            "20": {"wavelength": 480, "gain": 1, "offset": 0},
+        },
+    )
     bands = load_metadata(tmp_path / "band_metadata.json")
-    assert [(b.band_id, b.path.name) for b in bands] == [
-        ("20", "b20.raw"),
-        ("1", "b1.raw"),
-        ("2", "b2.raw"),
+    assert [(b.index, b.band_id, b.path.name) for b in bands] == [
+        (0, "20", "b20.raw"),
+        (1, "1", "b1.raw"),
+        (2, "2", "b2.raw"),
     ]
+
+
+def test_missing_field_is_reported(tmp_path):
+    """An entry without an offset names the band and the missing field."""
+    _write_challenge_layout(tmp_path, {"1": {"wavelength": 600, "gain": 1}})
+    with pytest.raises(KeyError, match="Band 1: missing \\['offset'\\]"):
+        load_metadata(tmp_path / "band_metadata.json")
+
+
+def test_missing_and_extra_band_files_are_reported(tmp_path):
+    """A metadata key without a file, or a file without a key, is an error."""
+    meta = {"1": {"wavelength": 600, "gain": 1, "offset": 0}}
+    _write_challenge_layout(tmp_path, meta)
+    (tmp_path / "b1.raw").unlink()
+    with pytest.raises(FileNotFoundError, match="b1.raw"):
+        load_metadata(tmp_path / "band_metadata.json")
+
+    _write_challenge_layout(tmp_path, meta)
+    np.zeros(SHAPE, np.uint8).tofile(tmp_path / "b7.raw")
+    with pytest.raises(ValueError, match="b7.raw"):
+        load_metadata(tmp_path / "band_metadata.json")
 
 
 def test_raw_size_mismatch_is_reported(tmp_path):
@@ -70,12 +67,13 @@ def test_raw_size_mismatch_is_reported(tmp_path):
 
 def test_correction_and_nodata(tmp_path):
     """Both gain/offset conventions are applied; DN 0 -> NaN and DN 255 -> saturated."""
-    _write_bands(tmp_path, 2)
-    meta = [
-        {"filename": "band_1.raw", "wavelength": 500, "gain": 0.5, "offset": 1.0},
-        {"filename": "band_2.raw", "wavelength": 600, "gain": 2.0, "offset": -1.0},
-    ]
-    (tmp_path / "band_metadata.json").write_text(json.dumps(meta))
+    _write_challenge_layout(
+        tmp_path,
+        {
+            "1": {"wavelength": 500, "gain": 0.5, "offset": 1.0},
+            "2": {"wavelength": 600, "gain": 2.0, "offset": -1.0},
+        },
+    )
     bands = load_metadata(tmp_path / "band_metadata.json")
     cube = load_cube(bands, SHAPE)
     cube[0, 0, 0] = 0  # no-data

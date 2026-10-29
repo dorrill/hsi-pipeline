@@ -47,10 +47,10 @@ The challenge input is a directory of 48 headerless uint8 files `b{n}.raw`
 and `band_metadata.json` of the form
 `{"<n>": {"wavelength": nm, "gain": …, "offset": …}}`.
 
-- Files are paired with metadata entries in this order of preference: a
-  filename given in the metadata; the band number in the key matched to the
-  number in the file stem (`"24"` → `b24.raw`, the challenge layout); natural-sort
-  order (the counts must match). A missing or unpaired file is an error.
+- Each metadata key `"n"` is paired with `b{n}.raw`. This is the only layout
+  accepted (`tools/make_synthetic.py` writes it too): a missing field, a missing
+  band file, or a `b*.raw` file with no metadata entry is an error, rather than
+  falling back to pairing by file order.
 - Band number is not monotonic in wavelength (bands 24 and 25, at 544–547 nm,
   sit among 21–23), so the cube is ordered by ascending wavelength; band ids are
   kept in every output.

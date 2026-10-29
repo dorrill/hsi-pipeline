@@ -61,7 +61,7 @@ def main() -> None:
     shifts = rng.uniform(-3, 3, (args.n_bands, 2))  # (dy, dx) per band
     shifts[0] = 0.0  # band 0 is the reference
 
-    meta, border = [], max(4, n // 64)
+    meta, border = {}, max(4, n // 64)
     for i in range(args.n_bands):
         land = veg[i] * (0.7 + 0.6 * texture)
         refl = np.where(water, sea[i], land)
@@ -74,17 +74,13 @@ def main() -> None:
         dn = np.clip(np.rint(dn), 1, 255).astype(np.uint8)  # 0 reserved for no-data
         dn[:, :border] = 0  # no-data strip
 
-        name = f"band_{i + 1:02d}.raw"
-        dn.tofile(args.out / name)
-        meta.append(
-            {
-                "band": i + 1,
-                "filename": name,
-                "wavelength_nm": round(float(wl[i]), 2),
-                "gain": float(gains[i]),
-                "offset": float(offsets[i]),
-            }
-        )
+        # Same layout as the challenge data: key "n" <-> file b<n>.raw
+        dn.tofile(args.out / f"b{i + 1}.raw")
+        meta[str(i + 1)] = {
+            "wavelength": round(float(wl[i]), 2),
+            "gain": float(gains[i]),
+            "offset": float(offsets[i]),
+        }
 
     (args.out / "band_metadata.json").write_text(json.dumps(meta, indent=2))
     (args.out / "truth.json").write_text(
