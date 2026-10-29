@@ -19,8 +19,13 @@ python tools/make_synthetic.py --out synthetic_inputs
 hsi-pipeline --input-dir synthetic_inputs --output-dir outputs_synthetic
 ```
 
+Summary figures (SNR vs wavelength, registration before/after, offset check,
+cloud overlay, …) are written to `outputs/figures/` by
+`python tools/make_figures.py --input-dir inputs --output-dir outputs` after a run (needs the `viz` extra).
+
 The run is deterministic: no random state is used in the pipeline, and the
-synthetic generator is seeded. On the challenge data a run takes ~2 min and
+synthetic generator is seeded. A fresh clone installed into a new Python 3.13 venv
+reproduces all six outputs byte-for-byte. On the challenge data a run takes ~2 min and
 ~1.6 GB with the default 4 registration workers (`--workers N`; ~0.5 GB each).
 
 ## Outputs
@@ -37,12 +42,22 @@ synthetic generator is seeded. On the challenge data a run takes ~2 min and
 ## Method
 
 ### 1. Loading and metadata
-- Band files are paired with `band_metadata.json` entries by filename when the
-  metadata names them, otherwise by natural-sort file order (the counts must match).
-- The cube is ordered by ascending wavelength.
+The challenge input is a directory of 48 headerless uint8 files `b{n}.raw`
+(n = 1…80, not contiguous; each exactly 2048 × 2048 = 4,194,304 bytes, row-major)
+and `band_metadata.json` of the form
+`{"<n>": {"wavelength": nm, "gain": …, "offset": …}}`.
+
+- Files are paired with metadata entries in this order of preference: a
+  filename given in the metadata; the band number in the key matched to the
+  number in the file stem (`"24"` → `b24.raw`, the challenge layout); natural-sort
+  order (the counts must match). A missing or unpaired file is an error.
+- Band number is not monotonic in wavelength (bands 24 and 25, at 544–547 nm,
+  sit among 21–23), so the cube is ordered by ascending wavelength; band ids are
+  kept in every output.
+- Coverage is 470–729 nm with gaps at ~491–538, 559–602 and 685–712 nm. There
+  is no NIR or SWIR, which shapes the cloud test (§6).
 - Headerless files must be exactly 2048 × 2048 bytes. Any other size raises an
   error rather than guessing a header offset.
-- TODO: describe the actual input format once inspected.
 
 ### 2. Radiometric correction
 - Corrected value `L = gain · DN + offset`, computed per band in float32
@@ -287,7 +302,12 @@ cloud-coloured lines and blobs) and check that definite cloud is all found, and
 that land, thin or tiny decoys, and water beyond the buffer are not.
 
 ### 7. Ship detection (optional)
-TODO
+Not implemented. A natural extension of the steps above: within the cloud-free,
+valid water area (water = below the brightness threshold of §6), flag compact
+objects that are bright relative to a local water background (e.g. > k σ of a
+ring-shaped neighbourhood), keep those of plausible ship size and elongation, and
+score confidence from contrast and shape. Wakes and the column banding over
+water would be the main false-alarm sources.
 
 ## Assumptions
 - The gain/offset convention is linear (see above).
@@ -299,7 +319,13 @@ TODO
   static between band acquisitions: the field is fitted to the ground, so moving
   or high clouds keep a parallax/motion residual (their tiles are rejected as
   outliers rather than registered).
-- TODO
+- Noise is white and spatially uncorrelated at the 3×3 scale (Immerkær's
+  estimator, §5); the conventional colour windows are an adequate definition of
+  "red", "green" and "blue" for a display composite.
+- Clouds are spectrally flat in reflectance over 556–729 nm, and the surfaces
+  confused with them (land, sand, roofs) are relatively brighter at 729 nm.
+  Thresholds are found on each scene, but the method assumes a scene with a
+  dominant dark water cluster to measure the noise and set the brightness test.
 
 ## Limitations
 - Repaired offsets are a consistent replacement (the median of the normal
@@ -318,7 +344,8 @@ TODO
   the ground-truth check is on synthetic data only.
 - The per-channel stretch balances the scene average to grey; because the land
   is redder than the clouds, clouds look cyan. A white balance on cloud pixels
-  would fix this. A slow across-track response difference between bands
+  neutralises them but tints the surface (§5); natural colour needs atmospheric
+  correction. A slow across-track response difference between bands
   (reddish top-right corner) and the wider column banding (coloured streaks
   over water) are not corrected.
 - Each colour uses one band. Averaging neighbouring bands would raise the SNR
@@ -332,7 +359,12 @@ TODO
   per band; 729 nm drifts more than 556 nm), which slightly lowers the excess
   towards the left of the frame.
 - No cloud-shadow mask.
-- TODO
+- No ship detection (§7).
+- Only radiance-like corrected values are produced: no conversion to
+  reflectance (no solar geometry or atmospheric data) and no georeferencing (the
+  outputs are on the reference band's pixel grid).
+- Memory: the whole cube is held in float32 (~0.8 GB) plus the registered copy;
+  a larger capture would need band-by-band streaming.
 
 ## Project layout
 ```

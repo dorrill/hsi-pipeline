@@ -295,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         100 * rgb_valid.mean(),
     )
 
-    # 6. Optional ship detection    -> ships.json                (TODO)
+    # 6. Optional ship detection: not implemented (see README §7)
     return 0
 
 
