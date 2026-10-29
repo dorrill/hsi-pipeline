@@ -237,6 +237,20 @@ def read_band(path: Path, shape: tuple[int, int] = (HEIGHT, WIDTH)) -> np.ndarra
     return arr
 
 
+def write_tiff(path: Path, image: np.ndarray, photometric: str = "minisblack") -> None:
+    """Write an image as a plain TIFF (uncompressed, no georeferencing).
+
+    Args:
+        path: Output path.
+        image: ``(H, W)`` or ``(H, W, 3)`` array.
+        photometric: ``"rgb"`` for an ``(H, W, 3)`` colour image, else
+            ``"minisblack"``.
+    """
+    import tifffile
+
+    tifffile.imwrite(path, image, photometric=photometric)
+
+
 def load_cube(bands: list[BandInfo], shape: tuple[int, int] = (HEIGHT, WIDTH)) -> np.ndarray:
     """Stack all bands into a ``(n_bands, H, W)`` ``uint8`` cube (~200 MB for 48 bands)."""
     cube = np.empty((len(bands), *shape), dtype=np.uint8)

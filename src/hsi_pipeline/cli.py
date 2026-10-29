@@ -8,15 +8,23 @@ import logging
 import os
 from pathlib import Path
 
+import numpy as np
+
 from .calibration import check_offsets
-from .io import BandInfo, load_cube, load_metadata
+from .io import BandInfo, load_cube, load_metadata, write_tiff
 from .radiometry import (
     apply_radiometric_correction,
     band_summary,
     destripe_columns,
     validity_masks,
 )
-from .registration import BandRegistration, ResidualStats, register_cube
+from .registration import (
+    BandRegistration,
+    ResidualStats,
+    register_cube,
+    residual_misregistration,
+)
+from .rgb import RGB_WINDOWS_NM, band_snr, rgb_composite, select_rgb
 
 log = logging.getLogger("hsi_pipeline")
 
@@ -138,6 +146,43 @@ def registration_report(
     }
 
 
+def rgb_registration_report(
+    cube: np.ndarray,
+    bands: list[BandInfo],
+    chosen: dict[str, int],
+    registrations: list[BandRegistration],
+) -> dict:
+    """Registration error between the chosen R, G and B bands.
+
+    Args:
+        cube: ``(n_bands, H, W)`` float32 registered bands.
+        bands: Band metadata in cube order.
+        chosen: Cube index per colour.
+        registrations: Per-band results from ``register_cube``.
+
+    Returns:
+        The chosen bands, the misregistration re-measured between each pair of
+        registered RGB bands, and each band's field CV error vs the reference.
+    """
+    pairs = {"R-G": ("R", "G"), "B-G": ("B", "G"), "R-B": ("R", "B")}
+    measured = {
+        name: residual_misregistration(cube[chosen[a]], cube[chosen[b]])
+        for name, (a, b) in pairs.items()
+    }
+    return {
+        "bands": {c: bands[k].band_id for c, k in chosen.items()},
+        "pairs_after_registration": {
+            name: {k: round(v, 3) if isinstance(v, float) else v for k, v in vars(r).items()}
+            for name, r in measured.items()
+        },
+        "field_cv_error_vs_reference": {
+            c: {k: round(v, 3) if isinstance(v, float) else v
+                for k, v in vars(registrations[k_].cv).items()}
+            for c, k_ in chosen.items()
+        },
+    }  # fmt: skip
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the pipeline end to end and write outputs to ``--output-dir``.
 
@@ -179,9 +224,29 @@ def main(argv: list[str] | None = None) -> int:
     (args.output_dir / "band_summary.json").write_text(json.dumps(summary, indent=2))
     log.info("Wrote %s", args.output_dir / "band_summary.json")
 
-    # 3. Co-registration (every band to one reference, in place)
+    # 3. SNR per band and RGB choice, before registration: resampling smooths
+    #    noise and would inflate the SNR of every band but the reference.
+    snr = band_snr(corrected, bands, valid, saturated)
+    chosen = select_rgb(snr)
+    selection = {
+        "snr_definition": "noise-free scene std / noise std (Immerkaer Laplacian, "
+        "flattest 50% of pixels), on destriped, unregistered bands",
+        "windows_nm": RGB_WINDOWS_NM,
+        "chosen": {c: snr[k].band_id for c, k in chosen.items()},
+        "bands": [{k: round(v, 4) if isinstance(v, float) else v for k, v in vars(s).items()}
+                  for s in snr],
+    }  # fmt: skip
+    (args.output_dir / "band_selection.json").write_text(json.dumps(selection, indent=2))
+    log.info(
+        "RGB bands: %s",
+        ", ".join(f"{c}={snr[k].band_id} ({snr[k].wavelength_nm:.1f} nm, SNR {snr[k].snr:.1f})"
+                  for c, k in chosen.items()),
+    )  # fmt: skip
+
+    # 4. Co-registration of every band, in place. The reference is the green
+    #    band, so one RGB channel is never resampled.
     ids = [b.band_id for b in bands]
-    ref_index = len(bands) // 2 if args.reference_band is None else ids.index(args.reference_band)
+    ref_index = chosen["G"] if args.reference_band is None else ids.index(args.reference_band)
     log.info(
         "Registering %d bands to band %s (%.1f nm)",
         len(bands),
@@ -190,17 +255,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     registrations = register_cube(corrected, valid, ref_index, args.workers)
     stats = registration_report(bands, ref_index, registrations)
+    stats["rgb"] = rgb_registration_report(corrected, bands, chosen, registrations)
     (args.output_dir / "registration_stats.json").write_text(json.dumps(stats, indent=2))
+    for pair, r in stats["rgb"]["pairs_after_registration"].items():
+        log.info(
+            "RGB %s misregistration: median %.3f px, p95 %.3f px (%d tiles)",
+            pair, r["median_px"], r["p95_px"], r["n_tiles"],
+        )  # fmt: skip
+
+    # RGB composite on the registered grid
+    rgb, rgb_valid = rgb_composite(corrected, valid, chosen)
+    write_tiff(args.output_dir / "rgb_image.tif", rgb, photometric="rgb")
     log.info(
-        "Wrote %s (worst band residual: median %.3f px, p95 %.3f px)",
-        args.output_dir / "registration_stats.json",
-        max(r.residual.median_px for r in registrations),
-        max(r.residual.p95_px for r in registrations),
+        "Wrote %s (%.1f %% of pixels valid in all three channels)",
+        args.output_dir / "rgb_image.tif",
+        100 * rgb_valid.mean(),
     )
 
-    # 4. SNR-based RGB band choice  -> rgb_image.tif             (TODO)
     # 5. Cloud mask                 -> cloud_mask.tif            (TODO)
-    # 6. Optional ship detection    -> ships.png / ships.json    (TODO)
+    # 6. Optional ship detection    -> ships.json                (TODO)
     return 0
 
 

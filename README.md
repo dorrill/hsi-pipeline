@@ -27,9 +27,10 @@ synthetic generator is seeded. On the challenge data a run takes ~2 min and
 
 | File | Description |
 |---|---|
-| `rgb_image.tif` | TODO |
+| `rgb_image.tif` | uint8 (H, W, 3) display composite of the registered R, G, B bands; 0 = no-data in any channel (see §5) |
+| `band_selection.json` | Per-band noise, contrast and SNR, the colour windows, and the chosen bands |
 | `cloud_mask.tif` | uint8, same shape as the RGB image, 1 = cloud, 0 = not cloud. TODO |
-| `registration_stats.json` | Per band: coarse shift, field range, tiles used per pass, spline smoothing, residual misregistration after warping, and blocked cross-validation error of the field (see §4) |
+| `registration_stats.json` | Per band: coarse shift, field range, tiles used per pass, spline smoothing, residual misregistration after warping, blocked cross-validation error of the field; and `rgb`: misregistration measured between each pair of RGB bands (see §4) |
 | `band_summary.json` | Per-band DN range, valid/saturated fractions, corrected mean/std, offset check, removed stripe amplitude |
 
 ## Method
@@ -97,8 +98,9 @@ recorded as `stripe_amplitude`; `--no-destripe` skips the step.
   the image and is excluded from SNR statistics.
 - Registration resamples each band; output pixels whose source lies outside the
   frame, or within the cubic-spline support of a no-data pixel, become no-data.
-  For bands 1–44 this removes up to ~100 rows at the bottom and ~25 columns on
-  the right of the frame (the field reaches dy ≈ 98 px, dx ≈ 26 px).
+  With the green band (27) as reference this removes up to ~75 rows at the top
+  for bands 45–80 and up to ~45 rows at the bottom for bands 1–8. The RGB image
+  is valid in 97.5 % of the frame.
 - TODO: describe how NaNs are handled in the RGB and cloud mask outputs.
 
 ### 4. Co-registration (`registration.py`)
@@ -124,8 +126,8 @@ polynomial fails near the bottom edge. The field is therefore modelled
 non-parametrically.
 
 #### Method
-For each band, relative to the reference (default: the middle of the cube, band
-47 at 637.5 nm; `--reference-band`):
+For each band, relative to the reference (default: the chosen green band, so one
+RGB channel is never resampled; `--reference-band`):
 
 1. **Tile shifts by phase correlation** on 128 px tiles every 64 px. No-data is
    mean-filled and a Hann window suppresses FFT edge effects. The normalised
@@ -150,8 +152,9 @@ For each band, relative to the reference (default: the middle of the cube, band
    smoothings, scored by spatially blocked cross-validation (384 px blocks, so a
    held-out tile's overlapping neighbours are held out too), on a common tile
    set. The most flexible candidate within one standard error of the best is
-   used. The result follows the sensor geometry: smooth fields for bands in the
-   reference's detector segment, flexible ones for the other segment.
+   used. The result follows the sensor geometry: smooth fields for bands close
+   to the reference on the detector (small time offset), flexible ones for
+   distant bands, whose fields carry the along-track stretch.
 
 #### Evaluation
 `registration_stats.json` gives two error measures per band. They answer
@@ -166,17 +169,29 @@ different questions:
   the difficulty of predicting **into gaps** (open water), so it is pessimistic
   where tiles are dense.
 
+Reference band 27 (556 nm):
+
 | Bands | λ (nm) | Smoothing | Residual median / p95 / max (px) | CV median / p95 (px) |
 |---|---|---|---|---|
-| 1–8 | 470–491 | 1e-5 | 0.010–0.014 / ≤ 0.07 / ≤ 2.6 | 0.21–0.29 / 1.4–2.8 |
-| 20–28 | 538–559 | 1e-5 | 0.014–0.020 / ≤ 0.12 / ≤ 2.3 | 0.16–0.20 / 1.3–2.1 |
-| 40–44 | 602–628 | 1e-5 | 0.010–0.014 / ≤ 0.10 / ≤ 0.73 | 0.14–0.15 / 0.86–1.09 |
-| 45–64 | 632–686 | 1e-2 | 0.041–0.058 / ≤ 0.29 / ≤ 0.86 | 0.08–0.10 / 0.31–0.45 |
-| 75–80 | 712–729 | 1e-3 | 0.030–0.036 / ≤ 0.10 / ≤ 0.65 | 0.12–0.14 / 0.41–0.46 |
+| 1–8 | 470–491 | 1e-5 | 0.014–0.022 / ≤ 0.09 / ≤ 0.71 | 0.17–0.26 / 0.69–0.96 |
+| 20–28 | 538–559 | 1e-3, 1e-2 | 0.032–0.051 / ≤ 0.17 / ≤ 0.58 | 0.09–0.14 / 0.34–0.48 |
+| 40–44 | 602–628 | 1e-5 | 0.010–0.014 / ≤ 0.07 / ≤ 0.31 | 0.15–0.19 / 0.66–0.81 |
+| 45–64 | 632–686 | 1e-5 | 0.010–0.020 / ≤ 0.14 / ≤ 1.89 | 0.16–0.20 / 0.88–1.16 |
+| 75–80 | 712–729 | 1e-5 | 0.010 / ≤ 0.06 / ≤ 0.26 | 0.19–0.21 / 0.87–1.25 |
 
-Bands of the other detector segment (1–44) are registered to a few hundredths of
-a pixel where there is texture; their larger CV tails come from the stretched
-bottom rows, where a held-out block cannot be predicted from its neighbours.
+**Between the chosen RGB bands** (`rgb.pairs_after_registration`, re-measured
+on non-overlapping tiles of the registered bands):
+
+| Pair | Tiles | Median (px) | p95 (px) | Max (px) | Mean (dy, dx) (px) |
+|---|---|---|---|---|---|
+| R–G (43 vs 27) | 169 | 0.010 | 0.060 | 0.15 | (−0.002, −0.003) |
+| B–G (7 vs 27) | 170 | 0.014 | 0.079 | 0.27 | (0.000, −0.001) |
+| R–B (43 vs 7) | 168 | 0.041 | 0.202 | 0.41 | (−0.004, +0.006) |
+
+The CV error of the R and B fields (accuracy expected away from textured
+tiles, e.g. over water) is 0.17 / 0.18 px median and 0.81 / 0.75 px p95. Before
+registration the B band was displaced from G by 4–45 px and the R band by
+3–22 px, varying over the frame.
 
 **Validation against ground truth** (`tests/test_registration.py`): on
 `tools/make_synthetic.py` data (known per-band shifts, 1–5 DN noise, faint land
@@ -185,8 +200,43 @@ are recovered to 0.08–0.12 px median, and the reported CV error is above the t
 error for every band. A smooth non-affine field on a textured scene is recovered
 to 0.03 px median.
 
-### 5. RGB band selection (SNR)
-TODO
+### 5. RGB band selection (SNR) and composite (`rgb.py`)
+
+**SNR** is measured per band on the corrected, destriped bands *before*
+registration (resampling smooths noise and would inflate the SNR of every band
+except the reference):
+
+- *Noise*: Immerkær's estimator (CVIU 1996). The 3×3 operator
+  `[[1,−2,1],[−2,4,−2],[1,−2,1]]` cancels locally linear signal; for white
+  noise its mean absolute response is 6σ√(2/π). It is averaged over the flattest
+  50 % of pixels (lowest Sobel gradient), so edges and texture are not counted
+  as noise. A median-based version is not usable: on integer DN it returns
+  only a few quantised values (0.99 or 1.24 DN for every band). On synthetic
+  integer data with known noise the estimate is within 1 %.
+- *Signal*: the scene contrast, i.e. the standard deviation of the band with
+  the noise removed in quadrature.
+
+`SNR = contrast / noise`. Gain cancels and offset drops out, so the ranking does
+not depend on the doubtful calibration (band 1's gain, the ~110 DN floor). A
+mean-based SNR would mostly measure that floor.
+
+**Selection**: the highest-SNR band in each conventional colour window, blue
+450–495, green 495–570, red 620–700 nm:
+
+| Colour | Band | λ (nm) | SNR | Runner-up |
+|---|---|---|---|---|
+| R | 43 | 625.5 | 11.8 | 63 (683.5 nm), 9.9 |
+| G | 27 | 556.0 | 6.6 | 28 (559 nm), 6.5 |
+| B | 7 | 486.0 | 6.4 | 8 (491 nm), 6.4 |
+
+Noise is 0.9–1.2 DN in every band, close to the read-plus-quantisation floor,
+so the SNR differences come from how many DN the scene spans. The low-gain
+bands (40–44, 75–80, gain ≈ 0.3) span about twice as many DN, so they are the
+most sensitive, which puts R on band 43. Its repaired offset does not affect
+either the SNR or the display stretch.
+
+**Composite**: the three registered bands, each stretched linearly from its
+1st to 99th percentile onto 1–255; 0 marks pixels invalid in any channel.
 
 ### 6. Cloud mask
 TODO
@@ -221,13 +271,21 @@ TODO
   is not affected.
 - Registration error is measured with the same estimator that drives the fit;
   the ground-truth check is on synthetic data only.
+- The per-channel stretch balances the scene average to grey; because the land
+  is redder than the clouds, clouds look cyan. A white balance on cloud pixels
+  would fix this. A slow across-track response difference between bands
+  (reddish top-right corner) and the wider column banding (coloured streaks
+  over water) are not corrected.
+- Each colour uses one band. Averaging neighbouring bands would raise the SNR
+  further, at the cost of spectral purity and an extra registration step.
 - TODO
 
 ## Project layout
 ```
 src/hsi_pipeline/   io.py (loading), radiometry.py (correction, validity, destriping),
                     calibration.py (offset consistency check),
-                    registration.py (co-registration and its evaluation), cli.py (entry point)
+                    registration.py (co-registration and its evaluation),
+                    rgb.py (SNR, band choice, composite), cli.py (entry point)
 tools/              make_synthetic.py (test data with known per-band shifts)
 tests/              unit tests
 ```
