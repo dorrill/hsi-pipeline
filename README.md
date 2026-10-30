@@ -252,6 +252,22 @@ bands (40–44, 75–80, gain ≈ 0.3) span about twice as many DN, so they are 
 most sensitive, which puts R on band 43. Its repaired offset does not affect
 either the SNR or the display stretch.
 
+**Higher-SNR bands outside the windows.** Two groups of bands have higher SNR
+than band 43 but are deliberately not candidates:
+
+| Bands | λ (nm) | SNR | Why excluded |
+|---|---|---|---|
+| 40–42 | 602–608 | 13.7–15.0 | Yellow/orange (570–620 nm). Only ~46 nm from the green band, so R and G would be strongly correlated and the composite would lose colour contrast. Red channels of comparable sensors sit at ~630–690 nm (Landsat 8 OLI 636–673, Sentinel-2 B4 650–680). |
+| 75–80 | 712–729 | 12.7–13.7 | Beyond the visible (eye sensitivity ~1 % of peak at 720 nm) and on vegetation's red edge: a "red" channel here makes vegetation bright red, i.e. a false-colour composite. Band 80 is used by the cloud mask instead (§6). |
+
+Their SNR is high for an instrument reason, not a scene one: in corrected
+units the scene contrast is about the same in every band from 600 to 729 nm
+(3.7–4.6), while the ~1 DN noise is only ~0.3 units in these low-gain
+(≈ 0.3) bands against ~0.6 in bands 45–64. The 620 nm boundary is a convention;
+the CIE red colour-matching function peaks near 600 nm, so a 602–608 nm red is
+a defensible alternative for perceived colour, at the cost of colour separation.
+`RGB_WINDOWS_NM` in `rgb.py` sets the windows.
+
 **Composite**: the three registered bands, each stretched linearly from its
 1st to 99th percentile onto 1–255; 0 marks pixels invalid in any channel.
 
