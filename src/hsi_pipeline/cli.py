@@ -25,7 +25,14 @@ from .registration import (
     register_cube,
     residual_misregistration,
 )
-from .rgb import RGB_WINDOWS_NM, band_snr, rgb_composite, select_rgb
+from .rgb import (
+    RGB_WINDOWS_NM,
+    band_snr,
+    channel_weights,
+    combined_noise,
+    rgb_composite,
+    select_rgb,
+)
 
 log = logging.getLogger("hsi_pipeline")
 
@@ -72,9 +79,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Report but do not replace offsets that fail the consistency check",
     )
     p.add_argument(
-        "--no-destripe",
-        action="store_true",
-        help="Skip the column destriping applied after radiometric correction",
+        "--destripe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Remove per-column offsets after radiometric correction (default: on); "
+        "--no-destripe keeps the supplied calibration only",
+    )
+    p.add_argument(
+        "--average-neighbours",
+        type=int,
+        default=0,
+        metavar="K",
+        help="Average each RGB band with up to K wavelength neighbours on each side inside "
+        "its colour window, inverse-variance weighted (default: 0, single bands)",
     )
     p.add_argument(
         "--reference-band",
@@ -217,7 +234,9 @@ def main(argv: list[str] | None = None) -> int:
         cube_dn, bands, valid, args.convention, repair=not args.keep_metadata_offsets
     )
     corrected = apply_radiometric_correction(cube_dn, bands, valid, args.convention)
-    stripe_amplitude = None if args.no_destripe else destripe_columns(corrected)
+    stripe_amplitude = (
+        destripe_columns(corrected, saturated, args.workers) if args.destripe else None
+    )
     summary = band_summary(cube_dn, corrected, bands, valid, saturated, offset_checks)
     if stripe_amplitude is not None:
         for row, amp in zip(summary, stripe_amplitude, strict=True):
@@ -229,11 +248,23 @@ def main(argv: list[str] | None = None) -> int:
     #    noise and would inflate the SNR of every band but the reference.
     snr = band_snr(corrected, bands, valid, saturated)
     chosen = select_rgb(snr)
+    weights = channel_weights(snr, chosen, args.average_neighbours)
     selection = {
         "snr_definition": "noise-free scene std / noise std (Immerkaer Laplacian, "
-        "flattest 50% of pixels), on destriped, unregistered bands",
+        f"flattest 50% of pixels), on {'destriped' if args.destripe else 'calibrated'}, "
+        "unregistered bands",
         "windows_nm": RGB_WINDOWS_NM,
         "chosen": {c: snr[k].band_id for c, k in chosen.items()},
+        "channels": {
+            c: {
+                "weights": {snr[i].band_id: round(v, 4) for i, v in w.items()},
+                # independent-noise estimate; resampling and shared stripes change it
+                "noise_reduction_vs_chosen": round(
+                    snr[chosen[c]].noise / combined_noise(snr, w), 3
+                ),
+            }
+            for c, w in weights.items()
+        },
         "bands": [{k: round(v, 4) if isinstance(v, float) else v for k, v in vars(s).items()}
                   for s in snr],
     }  # fmt: skip
@@ -243,6 +274,12 @@ def main(argv: list[str] | None = None) -> int:
         ", ".join(f"{c}={snr[k].band_id} ({snr[k].wavelength_nm:.1f} nm, SNR {snr[k].snr:.1f})"
                   for c, k in chosen.items()),
     )  # fmt: skip
+    if args.average_neighbours:
+        log.info(
+            "RGB channels: %s",
+            "; ".join(f"{c} = " + " + ".join(f"{v:.2f}*b{snr[i].band_id}" for i, v in w.items())
+                      for c, w in weights.items()),
+        )  # fmt: skip
 
     # 4. Co-registration of every band, in place. The reference is the green
     #    band, so one RGB channel is never resampled.
@@ -287,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # RGB composite (per-channel percentile stretch; see README for why a white
     # balance on the cloud mask was tried and not kept)
-    rgb, rgb_valid = rgb_composite(corrected, valid, chosen)
+    rgb, rgb_valid = rgb_composite(corrected, valid, weights)
     write_tiff(args.output_dir / "rgb_image.tif", rgb, photometric="rgb")
     log.info(
         "Wrote %s (%.1f %% of pixels valid in all three channels)",

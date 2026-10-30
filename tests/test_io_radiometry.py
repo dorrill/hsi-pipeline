@@ -6,7 +6,13 @@ import numpy as np
 import pytest
 
 from hsi_pipeline.io import load_cube, load_metadata, read_band
-from hsi_pipeline.radiometry import apply_radiometric_correction, validity_masks
+from hsi_pipeline.radiometry import (
+    apply_radiometric_correction,
+    column_linear_fit,
+    column_offsets,
+    destripe_columns,
+    validity_masks,
+)
 
 SHAPE = (8, 8)
 
@@ -88,3 +94,69 @@ def test_correction_and_nodata(tmp_path):
 
     alt = apply_radiometric_correction(cube, bands, valid, convention="subtract_offset")
     assert alt[0, 1, 1] == pytest.approx(0.5 * (10 - 1.0))
+
+
+def _striped_scene(rng, size=256):
+    """Scene with a ramp, a slanted coastline and a saturated cloud, plus known stripes.
+
+    Returns the striped band (NaN no-data in the first 3 columns and 10 rows),
+    the stripe-free band, the injected zero-mean offsets and the saturation mask.
+    """
+    rows, cols = np.mgrid[:size, :size]
+    clean = 20.0 + 0.05 * cols + 15.0 * (cols > size // 4 + rows // 2)  # ramp + coastline
+    saturated = (rows - 60) ** 2 + (cols - 80) ** 2 < 30**2
+    clean[saturated] = 80.0  # clipped cloud top: no column offset survives clipping
+    offsets = rng.normal(0.0, 2.0, size)
+    offsets -= offsets.mean()
+    band = clean + rng.normal(0.0, 1.0, clean.shape) + np.where(saturated, 0.0, offsets)
+    band[:, :3] = np.nan
+    band[100:110] = np.nan
+    return band.astype(np.float32), clean, offsets, saturated
+
+
+def _column_error(band, clean, saturated):
+    """Mean of ``band - clean`` down each valid column, excluding saturated pixels."""
+    diff = np.where(saturated, np.nan, band - clean)[:, 3:]
+    return np.nanmean(diff, axis=0)
+
+
+def test_column_offsets_follow_injected_stripes():
+    """Estimated offsets track injected ones despite a coastline, a cloud and no-data."""
+    band, _, offsets, saturated = _striped_scene(np.random.default_rng(0))
+    est = column_offsets(band, saturated)
+    # The slow part of the pattern is indistinguishable from scene, so r < 1.
+    assert np.corrcoef(est[3:], offsets[3:])[0, 1] > 0.9
+    assert np.all(est[:3] == 0)  # no-data columns
+    assert est[3:].mean() == pytest.approx(0.0, abs=1e-9)
+
+
+def test_destripe_removes_column_to_column_stripes_and_keeps_the_level():
+    """Column-to-column jumps drop ~10x; the band level and the no-data are unchanged."""
+    band, clean, _, saturated = _striped_scene(np.random.default_rng(1))
+    cube = band[None].copy()
+    amplitude = destripe_columns(cube, saturated[None], workers=2)
+    before = np.diff(_column_error(band, clean, saturated)).std()
+    after = np.diff(_column_error(cube[0], clean, saturated)).std()
+    assert before > 2.5  # sqrt(2) * 2 DN
+    assert after < 0.35  # noise alone: sqrt(2 / 230) ~ 0.09
+    assert amplitude[0] > 1.5
+    assert abs(np.nanmean(cube[0] - clean)) < 0.1
+    assert np.isnan(cube[0, :, :3]).all() and np.isnan(cube[0, 100:110]).all()
+
+
+def test_column_linear_fit_recovers_ramps_despite_outliers():
+    """Known per-column gain and offset ramps are recovered with 20 % gross outliers."""
+    rng = np.random.default_rng(2)
+    h, w = 400, 64
+    x = rng.uniform(10.0, 100.0, (h, w))
+    gain = np.linspace(0.9, 1.1, w)
+    offset = np.linspace(-3.0, 3.0, w)
+    y = offset + gain * x + rng.normal(0.0, 0.5, (h, w))
+    outliers = rng.random((h, w)) < 0.2
+    y[outliers] += rng.uniform(20.0, 60.0, outliers.sum())  # clouds: far too bright
+    usable = np.ones((h, w), bool)
+    usable[:, 0] = False
+    intercept, slope = column_linear_fit(y, x, usable)
+    assert np.isnan(intercept[0]) and np.isnan(slope[0])
+    np.testing.assert_allclose(slope[1:], gain[1:], atol=0.005)
+    np.testing.assert_allclose(intercept[1:], offset[1:], atol=0.3)

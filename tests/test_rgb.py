@@ -7,7 +7,15 @@ import pytest
 from scipy import ndimage
 
 from hsi_pipeline.io import BandInfo
-from hsi_pipeline.rgb import BandSNR, band_snr, noise_sigma, rgb_composite, select_rgb
+from hsi_pipeline.rgb import (
+    BandSNR,
+    band_snr,
+    channel_weights,
+    combined_noise,
+    noise_sigma,
+    rgb_composite,
+    select_rgb,
+)
 
 
 def _scene(shape=(512, 512), seed=0):
@@ -59,7 +67,30 @@ def test_rgb_composite_reserves_zero_for_nodata():
     cube = np.stack([_scene(seed=s) for s in range(3)]).astype(np.float32)
     valid = np.ones(cube.shape, bool)
     valid[1, :10, :] = False
-    rgb, joint = rgb_composite(cube, valid, {"R": 0, "G": 1, "B": 2})
+    rgb, joint = rgb_composite(cube, valid, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}})
     assert rgb.shape == (512, 512, 3) and rgb.dtype == np.uint8
     assert (rgb[:10] == 0).all() and not joint[:10].any()
     assert rgb[10:].min() >= 1
+
+
+def test_channel_weights_are_inverse_variance_inside_the_window():
+    """Neighbours outside the window are skipped; a noisier band gets less weight."""
+    table = [(560, 1.0), (600, 1.0), (625, 1.0), (628, 2.0), (632, 1.0)]  # (nm, noise)
+    snr = [BandSNR(str(i), w, n, 5.0, 5.0 / n) for i, (w, n) in enumerate(table)]
+    chosen = {"R": 2, "G": 0, "B": 0}
+    assert channel_weights(snr, chosen, 0)["R"] == {2: 1.0}
+    w = channel_weights(snr, chosen, 1)["R"]  # band 1 (600 nm) is outside 620-700
+    assert set(w) == {2, 3}
+    assert w[2] == pytest.approx(0.8) and w[3] == pytest.approx(0.2)  # 1 : 1/4
+    assert combined_noise(snr, w) < snr[2].noise
+
+
+def test_weighted_composite_matches_single_band_when_unweighted():
+    """A one-band channel is the band itself; averaging two equal bands changes nothing."""
+    cube = np.stack([_scene(seed=s) for s in range(3)]).astype(np.float32)
+    valid = np.ones(cube.shape, bool)
+    single, _ = rgb_composite(cube, valid, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}})
+    pair = np.concatenate([cube, cube[1:2]])  # band 3 duplicates band 1
+    valid4 = np.ones(pair.shape, bool)
+    avg, _ = rgb_composite(pair, valid4, {"R": {0: 1.0}, "G": {1: 0.5, 3: 0.5}, "B": {2: 1.0}})
+    assert np.array_equal(single, avg)

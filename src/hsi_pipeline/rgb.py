@@ -22,6 +22,14 @@ SNR definition:
 
 Selection:
     The band with the highest SNR inside each colour window (``RGB_WINDOWS_NM``).
+
+Optional neighbour averaging (``channel_weights``):
+    Each channel can instead be the inverse-variance weighted mean of the chosen
+    band and up to ``k`` wavelength neighbours on each side inside the same
+    window. Inverse-variance weights give the minimum-noise combination of bands
+    that measure (nearly) the same signal, so a noisier neighbour cannot make
+    the channel worse. It also breaks up the 8-bit quantisation: the chosen
+    bands span only 34-55 DN over the display stretch.
 """
 
 from __future__ import annotations
@@ -137,25 +145,69 @@ def select_rgb(snr: list[BandSNR]) -> dict[str, int]:
     return chosen
 
 
+def channel_weights(
+    snr: list[BandSNR], chosen: dict[str, int], half_width: int = 0
+) -> dict[str, dict[int, float]]:
+    """Bands and weights that make up each display channel.
+
+    Args:
+        snr: Per-band SNR in cube order (cube order is ascending wavelength).
+        chosen: Cube index per colour, from :func:`select_rgb`.
+        half_width: Neighbours on each side of the chosen band to average with;
+            0 uses the chosen band alone.
+
+    Returns:
+        Per colour, cube index -> weight (summing to 1). Neighbours outside the
+        colour window are skipped; weights are proportional to ``1 / noise**2``.
+    """
+    weights = {}
+    for colour, k in chosen.items():
+        lo, hi = RGB_WINDOWS_NM[colour]
+        members = [
+            i
+            for i in range(k - half_width, k + half_width + 1)
+            if 0 <= i < len(snr) and lo <= snr[i].wavelength_nm <= hi
+        ]
+        inv_var = {i: 1.0 / snr[i].noise ** 2 for i in members}
+        total = sum(inv_var.values())
+        weights[colour] = {i: w / total for i, w in inv_var.items()}
+    return weights
+
+
+def combined_noise(snr: list[BandSNR], weights: dict[int, float]) -> float:
+    """Noise of a weighted band mean, assuming independent noise between bands.
+
+    Args:
+        snr: Per-band SNR in cube order.
+        weights: Cube index -> weight, from :func:`channel_weights`.
+
+    Returns:
+        Noise standard deviation in corrected units. Column stripes are
+        correlated between bands, so this is a lower bound for the stripe part.
+    """
+    return float(np.sqrt(sum((w * snr[i].noise) ** 2 for i, w in weights.items())))
+
+
 def rgb_composite(
-    cube: np.ndarray, valid: np.ndarray, chosen: dict[str, int]
+    cube: np.ndarray, valid: np.ndarray, weights: dict[str, dict[int, float]]
 ) -> tuple[np.ndarray, np.ndarray]:
-    """8-bit display composite of the chosen (registered) bands.
+    """8-bit display composite of the (registered) channel bands.
 
     Args:
         cube: ``(n_bands, H, W)`` float32 registered corrected values.
         valid: ``(n_bands, H, W)`` bool validity after registration.
-        chosen: Cube index per colour, from :func:`select_rgb`.
+        weights: Per colour, cube index -> weight, from :func:`channel_weights`.
 
     Returns:
-        ``(H, W, 3)`` uint8 RGB, 0 in all channels where any channel is
-        invalid; and the ``(H, W)`` bool joint validity.
+        ``(H, W, 3)`` uint8 RGB, 0 in all channels where any contributing band
+        is invalid; and the ``(H, W)`` bool joint validity.
     """
-    order = [chosen["R"], chosen["G"], chosen["B"]]
-    joint = valid[order].all(axis=0)
+    used = sorted({i for w in weights.values() for i in w})
+    joint = valid[used].all(axis=0)
     rgb = np.zeros((*joint.shape, 3), np.uint8)
-    for c, k in enumerate(order):
-        lo, hi = np.percentile(cube[k][joint], STRETCH_PERCENTILES)
-        scaled = (cube[k] - lo) / (hi - lo) * 254 + 1
+    for c, colour in enumerate(("R", "G", "B")):
+        channel = sum(w * cube[i] for i, w in weights[colour].items())
+        lo, hi = np.percentile(channel[joint], STRETCH_PERCENTILES)
+        scaled = (channel - lo) / (hi - lo) * 254 + 1
         rgb[..., c] = np.where(joint, np.clip(np.rint(scaled), 1, 255), 0).astype(np.uint8)
     return rgb, joint

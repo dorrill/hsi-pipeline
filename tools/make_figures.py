@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from hsi_pipeline.calibration import check_offsets  # noqa: E402
 from hsi_pipeline.io import load_cube, load_metadata  # noqa: E402
 from hsi_pipeline.radiometry import (  # noqa: E402
+    SATURATION_DN,
     apply_radiometric_correction,
     destripe_columns,
     validity_masks,
@@ -124,14 +125,14 @@ def registration_figures(input_dir: Path, sel: dict, reg_stats: dict, out: Path)
     del full, full_valid
     three = [replace(repaired[k], index=i) for i, k in enumerate(order)]
     cube = apply_radiometric_correction(dn_all, three, valid)
-    destripe_columns(cube)
+    destripe_columns(cube, dn_all == SATURATION_DN)
 
-    before, _ = rgb_composite(cube, valid, {"R": 0, "G": 1, "B": 2})
+    before, _ = rgb_composite(cube, valid, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}})
     fields = {}
     reg_cube, reg_valid = cube.copy(), valid.copy()
     for i, c in ((0, "R"), (2, "B")):
         reg_cube[i], reg_valid[i], fields[c], _ = register_band(cube[1], cube[i], valid[i])
-    after, _ = rgb_composite(reg_cube, reg_valid, {"R": 0, "G": 1, "B": 2})
+    after, _ = rgb_composite(reg_cube, reg_valid, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}})
 
     fig, axes = plt.subplots(2, len(CROPS), figsize=(7 * len(CROPS), 14))
     for j, (title, r, c) in enumerate(CROPS):

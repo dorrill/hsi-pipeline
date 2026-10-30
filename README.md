@@ -25,7 +25,7 @@ cloud overlay, …) are written to `outputs/figures/` by
 
 The run is deterministic: no random state is used in the pipeline, and the
 synthetic generator is seeded. A fresh clone installed into a new Python 3.13 venv
-reproduces all six outputs byte-for-byte. On the challenge data a run takes ~2 min and
+reproduces all six outputs byte-for-byte. On the challenge data a run takes ~2.5 min and
 ~1.6 GB with the default 4 registration workers (`--workers N`; ~0.5 GB each).
 
 ## Outputs
@@ -98,14 +98,45 @@ logged but **not** changed: band 1 (470 nm, gain 1.368, about twice its
 neighbours) comes out 72 % above band 2, which suggests a wrong gain, but a gain
 cannot be re-estimated from neighbours without assuming the scene spectrum.
 
-#### Column destriping
+#### Column destriping (beyond the supplied calibration)
 Every band has single-column stripes of ~2 DN, twice the random noise (~1 DN
 from row-to-row differences), and the pattern is the same in all bands
-(r ≈ 0.91 between 470 and 659 nm): a detector-column offset. For each band the
-stripe pattern is the column-median profile minus its 15-column running median,
-subtracted from every row. This lowers the stripe power ~20× above
-0.05 cycles/px; banding wider than the window remains. The removed amplitude is
-recorded as `stripe_amplitude`; `--no-destripe` skips the step.
+(r ≈ 0.91 between 470 and 659 nm): a detector-column offset. The metadata has no
+per-column terms, so removing it is an empirical correction on top of the
+supplied gain/offset. It is on by default; `--no-destripe` gives the
+supplied-calibration-only output.
+
+For each band, every row is smoothed with a 15-column running median, which
+follows the scene but not single-column stripes; a column's offset is the median
+of its row residuals over valid, unsaturated pixels, and is subtracted from every
+row. The estimate is refined with a second pass, because the stripes themselves
+pull the running median. Offsets are zero-mean, so band levels are unchanged.
+The removed amplitude is recorded as `stripe_amplitude` in `band_summary.json`.
+
+`tools/destripe_diagnostics.py` evaluates this split-half: offsets estimated on
+the even rows are removed from the odd rows, and the stripe amplitude is
+re-measured there (corrected units; floor = the same measurement on white noise):
+
+| Colour | Band | Before | After | Earlier method¹ | Noise floor |
+|---|---|---|---|---|---|
+| R | 43 | 0.58 | 0.063 | 0.14 | 0.012 |
+| G | 27 | 1.15 | 0.11 | 0.30 | 0.024 |
+| B | 7 | 0.92 | 0.10 | 0.22 | 0.022 |
+
+¹ Column-median profile minus its running median, used before the review.
+
+![Destriping, open water](outputs/diagnostics/destripe_crop.png)
+
+What is left is banding a few to ~20 columns wide (visible in the crop). It is
+not identifiable this way: a column pattern that varies more slowly than the
+window looks the same as scene content that is constant along the track. The
+same ambiguity applies to the cross-track ramp (see Instrument artifacts).
+
+Effect downstream: the RGB band choice and the SNR table below are unchanged.
+Registration improves slightly (R–B p95 0.20 → 0.18 px). The cloud mask grows
+from 4.2 % to 5.3 %: cleaner water lowers the noise estimate (1.19 → 1.08) and
+with it the brightness threshold, adding mostly faint cloud margins but also
+a few small objects on land.
 
 ### 3. Invalid pixels
 - DN = 0 is treated as no-data (configurable with `--nodata`) and becomes NaN
@@ -116,7 +147,7 @@ recorded as `stripe_amplitude`; `--no-destripe` skips the step.
   frame, or within the cubic-spline support of a no-data pixel, become no-data.
   With the green band (27) as reference this removes up to ~75 rows at the top
   for bands 45–80 and up to ~45 rows at the bottom for bands 1–8. The RGB image
-  is valid in 97.5 % of the frame.
+  is valid in 97.4 % of the frame.
 - In the outputs, no-data is 0 in all three channels of `rgb_image.tif`, and 0
   (not cloud) in `cloud_mask.tif`; the joint no-data area is the same in both.
 
@@ -190,23 +221,23 @@ Reference band 27 (556 nm):
 
 | Bands | λ (nm) | Smoothing | Residual median / p95 / max (px) | CV median / p95 (px) |
 |---|---|---|---|---|
-| 1–8 | 470–491 | 1e-5 | 0.014–0.022 / ≤ 0.09 / ≤ 0.71 | 0.17–0.26 / 0.69–0.96 |
-| 20–28 | 538–559 | 1e-3, 1e-2 | 0.032–0.051 / ≤ 0.17 / ≤ 0.58 | 0.09–0.14 / 0.34–0.48 |
-| 40–44 | 602–628 | 1e-5 | 0.010–0.014 / ≤ 0.07 / ≤ 0.31 | 0.15–0.19 / 0.66–0.81 |
-| 45–64 | 632–686 | 1e-5 | 0.010–0.020 / ≤ 0.14 / ≤ 1.89 | 0.16–0.20 / 0.88–1.16 |
-| 75–80 | 712–729 | 1e-5 | 0.010 / ≤ 0.06 / ≤ 0.26 | 0.19–0.21 / 0.87–1.25 |
+| 1–8 | 470–491 | 1e-5 | 0.012–0.020 / ≤ 0.09 / ≤ 0.46 | 0.16–0.25 / 0.73–0.97 |
+| 20–28 | 538–559 | 1e-3, 1e-2 | 0.032–0.051 / ≤ 0.17 / ≤ 0.63 | 0.09–0.14 / 0.35–0.49 |
+| 40–44 | 602–628 | 1e-5 | 0.010–0.014 / ≤ 0.07 / ≤ 0.31 | 0.15–0.19 / 0.65–0.92 |
+| 45–64 | 632–686 | 1e-5 | 0.010–0.020 / ≤ 0.16 / ≤ 1.68 | 0.15–0.21 / 0.93–1.31 |
+| 75–80 | 712–729 | 1e-5 | 0.010 / ≤ 0.07 / ≤ 0.25 | 0.18–0.21 / 0.81–1.15 |
 
 **Between the chosen RGB bands** (`rgb.pairs_after_registration`, re-measured
 on non-overlapping tiles of the registered bands):
 
 | Pair | Tiles | Median (px) | p95 (px) | Max (px) | Mean (dy, dx) (px) |
 |---|---|---|---|---|---|
-| R–G (43 vs 27) | 169 | 0.010 | 0.060 | 0.15 | (−0.002, −0.003) |
-| B–G (7 vs 27) | 170 | 0.014 | 0.079 | 0.27 | (0.000, −0.001) |
-| R–B (43 vs 7) | 168 | 0.041 | 0.202 | 0.41 | (−0.004, +0.006) |
+| R–G (43 vs 27) | 169 | 0.014 | 0.056 | 0.16 | (−0.002, −0.002) |
+| B–G (7 vs 27) | 170 | 0.014 | 0.071 | 0.25 | (0.000, −0.001) |
+| R–B (43 vs 7) | 168 | 0.036 | 0.182 | 0.41 | (−0.005, 0.000) |
 
 The CV error of the R and B fields (accuracy expected away from textured
-tiles, e.g. over water) is 0.17 / 0.18 px median and 0.81 / 0.75 px p95. Before
+tiles, e.g. over water) is 0.16 / 0.16 px median and 0.77 / 0.73 px p95. Before
 registration the B band was displaced from G by 4–45 px and the R band by
 3–22 px, varying over the frame.
 
@@ -232,6 +263,11 @@ except the reference):
   integer data with known noise the estimate is within 1 %.
 - *Signal*: the scene contrast, i.e. the standard deviation of the band with
   the noise removed in quadrature.
+
+Column stripes are invisible to this noise estimator: they are constant down a
+column, and the operator's vertical second difference cancels them. Without
+destriping they count as scene contrast instead, so destriping lowers SNR by
+0–17 % per band (most in the noisier bands) but does not change the RGB choice.
 
 `SNR = contrast / noise`. Gain cancels and offset drops out, so the ranking does
 not depend on the doubtful calibration (band 1's gain, the ~110 DN floor). A
@@ -271,6 +307,17 @@ a defensible alternative for perceived colour, at the cost of colour separation.
 **Composite**: the three registered bands, each stretched linearly from its
 1st to 99th percentile onto 1–255; 0 marks pixels invalid in any channel.
 
+The chosen bands span only 34–55 DN over that stretch, so the 8-bit input shows
+as steps of ~4–7 display levels. In G (band 27, the registration reference and
+therefore not resampled) only 63 distinct values occur. The noise (~8 levels in
+G) dithers the steps, so they are not visible as contours. `--average-neighbours K`
+makes each channel the inverse-variance weighted mean of its band and up to K
+neighbours on each side inside the same colour window. With K = 1 the display
+noise falls from 3.2/8.1/6.0 to 2.7/3.9/3.7 levels (R/G/B) and G uses all 255
+values. The column stripes are unchanged, because they are shared between bands.
+The default stays K = 0, the single highest-SNR band per colour that the task asks
+for. The weights are recorded in `band_selection.json` under `channels`.
+
 This balances the scene *average* to grey. Because the land here is redder than
 the clouds, the clouds come out slightly cyan. A white balance on the cloud mask
 (clouds are spectrally flat) was tried and not kept: it made the clouds neutral
@@ -297,12 +344,12 @@ mean (single-pixel SNR is ~6):
 
 1. **Brightness**: green radiance more than 5σ above the water mode, where σ is
    the water cluster's noise measured on its dark side (free of cloud and
-   land). Water noise alone passes with probability ~3·10⁻⁷. Here: mode 69.9,
-   σ 1.19, threshold 75.8.
+   land). Water noise alone passes with probability ~3·10⁻⁷. Here: mode 69.7,
+   σ 1.08, threshold 75.1.
 2. **Spectral shape**: the *red-edge excess* is the height above the cloud line,
-   fitted to the lower envelope of the bright pixels (slope 0.954). Among bright
+   fitted to the lower envelope of the bright pixels (slope 0.957). Among bright
    pixels its histogram is bimodal (cloud ≈ +1, land ≈ +4). The threshold is the
-   minimum of the smoothed histogram between the modes (2.09), so it comes from
+   minimum of the smoothed histogram between the modes (2.18), so it comes from
    the data. Otsu's method was tried first and put the split at 3.0, inside the
    land mode, because it is biased towards the larger class. 90 % of cloud
    pixels lie below 1.6; 90 % of airfield and beach pixels lie above 2.4.
@@ -311,7 +358,7 @@ mean (single-pixel SNR is ~6):
    filled; a 2 px buffer covers mixed edge pixels and the small cloud parallax
    (clouds sit above the ground the bands were registered to).
 
-Result: 4.2 % of the valid frame, 83 objects (`figures/cloud_mask_overlay.png`
+Result: 5.3 % of the valid frame, 86 objects (`figures/cloud_mask_overlay.png`
 from `tools/make_figures.py`). The tests build a synthetic scene from the same
 physics (water, red-edge land, soft clouds mixed linearly with water, and
 cloud-coloured lines and blobs) and check that definite cloud is all found, and
@@ -390,6 +437,7 @@ src/hsi_pipeline/   io.py (loading), radiometry.py (correction, validity, destri
                     rgb.py (SNR, band choice, composite), cloud.py (cloud mask),
                     cli.py (entry point)
 tools/              make_figures.py (summary figures, needs the viz extra)
+                    destripe_diagnostics.py (destriping before/after, viz extra)
                     make_synthetic.py (test data with known per-band shifts)
 tests/              unit tests
 ```
