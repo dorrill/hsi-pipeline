@@ -1,6 +1,6 @@
 """Band-to-band co-registration: local phase correlation and a smooth displacement field.
 
-What the data shows (see README, "Co-registration"):
+What the data shows (see docs/instrument_notes.md, "Band-to-band geometry"):
     The capture behaves like a push-broom sensor whose bands are separate strips
     of detector rows, so each band sees a ground point at a different time.
     Relative to a reference band, displacements reach ~50 px, grow linearly

@@ -340,8 +340,8 @@ def main(argv: list[str] | None = None) -> int:
             r["cloud"]["median_px"],
         )  # fmt: skip
 
-    # 7. RGB composite (per-channel percentile stretch; see README for why a white
-    # balance on the cloud mask was tried and not kept)
+    # 7. RGB composite (per-channel percentile stretch; see docs/instrument_notes.md,
+    #    "Colour balance", for why a white balance on the clouds was not kept)
     rgb = rgb_composite(corrected, weights, footprint)
     write_tiff(args.output_dir / "rgb_image.tif", rgb, photometric="rgb")
     log.info(
@@ -350,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         100 * footprint.mean(),
     )
 
-    # Optional ship detection: not implemented (see README §7)
+    # Optional ship detection: not implemented
     return 0
 
 
