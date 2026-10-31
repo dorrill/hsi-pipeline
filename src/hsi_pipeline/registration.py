@@ -39,12 +39,17 @@ Estimation, per band:
 
 Evaluation:
     * ``residual``: shifts re-measured on non-overlapping tiles between the
-      registered band and the reference, i.e. what is left in the output.
+      registered band and the reference, with the estimator that drove the fit.
+      A field flexible enough to follow the tiles absorbs their measurement
+      errors, so this is a self-consistency check and optimistic.
     * ``cv``: spatially blocked cross-validation of the field against the total
       tile shifts (field at the tile centre plus what is still measured there).
       It is not flattered by a spline that passes through its own data, and it
-      covers predictions into gaps such as open water.
-    Both include the estimator's own noise, so they are upper bounds.
+      covers predictions into gaps such as open water, so it is pessimistic
+      where tiles are dense.
+    * ``independent_residual``: Lucas-Kanade, a gradient method the fit did not
+      use, on smaller windows offset from the fit's tiles, split into clear and
+      cloudy windows. This is the accuracy estimate for the output image.
 """
 
 from __future__ import annotations
@@ -109,6 +114,21 @@ MAX_PASSES = 4
 #: the tile size, so a held-out tile's overlapping neighbours are mostly held
 #: out with it and cannot leak its content into the training set.
 CV_BLOCK_PX = 384
+
+#: Independent check (:func:`independent_residual`): Lucas-Kanade on windows of
+#: this size, whose centres are offset from the fit's tile centres.
+CHECK_WINDOW_PX = 64
+#: A window is used only if its standard deviation is at least this many times
+#: the reference band's noise, i.e. it holds scene structure. Open water holds
+#: mostly noise and column banding, and registration shifts the banding by a few
+#: px between bands, so the check would measure the banding instead.
+CHECK_MIN_CONTRAST = 4.0
+#: Windows more than this fraction cloud are reported separately: clouds move
+#: and sit above the ground the field was fitted to.
+CHECK_CLOUD_FRACTION = 0.2
+#: Margin of the moving window (px), the largest shift the check can measure.
+_CHECK_PAD_PX = 4
+_CHECK_ITERATIONS = 10
 
 MAD_TO_SIGMA = 1.4826
 
@@ -641,6 +661,87 @@ def residual_misregistration(
             *(arr[np.all(origin % TILE_PX == 0, axis=1)] for arr in vars(tiles).values())
         )
     return _stats(tiles.shift_px[tiles.peak >= MIN_PEAK])
+
+
+def _standardise(x: np.ndarray) -> np.ndarray:
+    """Zero mean, unit standard deviation (removes band gain and offset)."""
+    return (x - x.mean()) / x.std()
+
+
+def lucas_kanade_shift(reference: np.ndarray, moving: np.ndarray) -> np.ndarray:
+    """Translation of ``moving`` relative to ``reference`` by iterative Lucas-Kanade.
+
+    Solves ``grad(ref) . d = ref - moving(p + d)`` in least squares, using the
+    reference gradient for every iteration, with both windows standardised so
+    the bands' different gain and offset cancel.
+
+    Args:
+        reference: ``(W, W)`` float window.
+        moving: ``(W + 2P, W + 2P)`` float window around the same position, with
+            a margin of ``P`` px on each side so it can be sampled at ``p + d``.
+
+    Returns:
+        ``(2,)`` float64 ``(dy, dx)`` such that ``moving(p + d) ~ reference(p)``;
+        NaN if the shift leaves the margin (no reliable estimate).
+    """
+    pad = (moving.shape[0] - reference.shape[0]) // 2
+    ref = _standardise(reference)
+    gy, gx = np.gradient(ref)
+    hessian = np.array([[np.sum(gy * gy), np.sum(gy * gx)], [np.sum(gy * gx), np.sum(gx * gx)]])
+    coeffs = ndimage.spline_filter(moving, order=3)
+    yy, xx = np.mgrid[pad : pad + ref.shape[0], pad : pad + ref.shape[1]].astype(np.float64)
+    d = np.zeros(2)
+    for _ in range(_CHECK_ITERATIONS):
+        sampled = ndimage.map_coordinates(coeffs, [yy + d[0], xx + d[1]], order=3, prefilter=False)
+        error = ref - _standardise(sampled)
+        step = np.linalg.solve(hessian, [np.sum(gy * error), np.sum(gx * error)])
+        d += step
+        if np.abs(d).max() > pad - 1:
+            return np.full(2, np.nan)
+        if np.abs(step).max() < 1e-4:
+            break
+    return d
+
+
+def independent_residual(
+    reference: np.ndarray, moving: np.ndarray, reference_noise: float, cloud: np.ndarray
+) -> dict[str, ResidualStats]:
+    """Remaining misregistration measured with a method the fit did not use.
+
+    The field and :func:`residual_misregistration` both use phase correlation
+    on 128 px tiles, so neither can see that estimator's own errors. This check
+    uses Lucas-Kanade (:func:`lucas_kanade_shift`) on ``CHECK_WINDOW_PX``
+    windows offset from the fit's tiles, keeping windows with scene structure
+    (``CHECK_MIN_CONTRAST``). On the challenge data its noise floor (the green
+    band against itself, each copy with independent noise at the band's own
+    level added) is 0.013 px median and 0.034 px p95.
+
+    Args:
+        reference: ``(H, W)`` float registered band, NaN at no-data.
+        moving: ``(H, W)`` float registered band, NaN at no-data.
+        reference_noise: Noise standard deviation of ``reference``.
+        cloud: ``(H, W)`` bool cloud mask.
+
+    Returns:
+        Statistics for ``"clear"`` and ``"cloud"`` windows
+        (``CHECK_CLOUD_FRACTION``).
+    """
+    w, pad = CHECK_WINDOW_PX, _CHECK_PAD_PX
+    h, width = reference.shape
+    shifts: dict[str, list[np.ndarray]] = {"clear": [], "cloud": []}
+    for r0 in range(pad, h - w - pad + 1, w):
+        for c0 in range(pad, width - w - pad + 1, w):
+            ref = reference[r0 : r0 + w, c0 : c0 + w].astype(np.float64)
+            mov = moving[r0 - pad : r0 + w + pad, c0 - pad : c0 + w + pad].astype(np.float64)
+            if not (np.isfinite(ref).all() and np.isfinite(mov).all()):
+                continue
+            if ref.std() < CHECK_MIN_CONTRAST * reference_noise:
+                continue
+            d = lucas_kanade_shift(ref, mov)
+            if np.isfinite(d).all():
+                cloudy = cloud[r0 : r0 + w, c0 : c0 + w].mean() > CHECK_CLOUD_FRACTION
+                shifts["cloud" if cloudy else "clear"].append(d)
+    return {region: _stats(np.reshape(v, (-1, 2))) for region, v in shifts.items()}
 
 
 @dataclass(frozen=True)

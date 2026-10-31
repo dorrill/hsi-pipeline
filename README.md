@@ -36,7 +36,7 @@ reproduces all six outputs byte-for-byte. On the challenge data a run takes ~2.5
 | `band_selection.json` | Per-band noise, contrast and SNR, the colour windows, and the chosen bands |
 | `cloud_mask.tif` | uint8 (H, W) on the same grid as `rgb_image.tif`: 1 = cloud, 0 = not cloud; also 0 outside the shared footprint, where `rgb_image.tif` is 0 (§3) |
 | `cloud_stats.json` | Bands used, the water reference, noise and thresholds found on the data, cloud and land ratio modes, cloud fraction, object count, no-data pixels |
-| `registration_stats.json` | Per band: coarse shift, field range, tiles used per pass, spline smoothing, residual misregistration after warping, blocked cross-validation error of the field; and `rgb`: misregistration measured between each pair of RGB bands (see §4) |
+| `registration_stats.json` | Per band: coarse shift, field range, tiles used per pass, spline smoothing, residual misregistration after warping, blocked cross-validation error of the field; and `rgb`: misregistration between each pair of RGB bands by an independent check (clear and cloudy windows), the self-consistency residual, and the fields' CV error (see §4) |
 | `band_summary.json` | Per-band DN range, valid/saturated fractions, corrected mean/std, offset check, removed stripe amplitude |
 
 ## Method
@@ -236,19 +236,31 @@ Reference band 27 (556 nm):
 | 45–64 | 632–686 | 1e-5 | 0.010–0.020 / ≤ 0.16 / ≤ 1.68 | 0.15–0.21 / 0.93–1.31 |
 | 75–80 | 712–729 | 1e-5 | 0.010 / ≤ 0.07 / ≤ 0.25 | 0.18–0.21 / 0.81–1.15 |
 
-**Between the chosen RGB bands** (`rgb.pairs_after_registration`, re-measured
-on non-overlapping tiles of the registered bands):
+**Between the chosen RGB bands.** Before registration B was displaced from G by
+10–37 px and R by 8–23 px, varying over the frame. Afterwards, the accuracy
+estimate is `rgb.independent_check`: a method the fit did not use (Lucas–Kanade,
+a gradient method, instead of phase correlation), on 64 px windows offset from
+the fit's 128 px tiles. Only windows with scene structure are used (standard
+deviation ≥ 4× the band noise): open water holds mostly noise and column banding,
+which registration shifts by a few px between bands, so it would measure the
+banding. Windows more than 20 % cloud are reported separately, because clouds
+move between band acquisitions and sit above the ground the field was fitted to.
+The check's own noise floor (green against itself with independent noise) is
+0.013 px median, 0.034 px p95.
 
-| Pair | Tiles | Median (px) | p95 (px) | Max (px) | Mean (dy, dx) (px) |
-|---|---|---|---|---|---|
-| R–G (43 vs 27) | 169 | 0.014 | 0.056 | 0.16 | (−0.002, −0.002) |
-| B–G (7 vs 27) | 170 | 0.014 | 0.071 | 0.25 | (0.000, −0.001) |
-| R–B (43 vs 7) | 168 | 0.036 | 0.182 | 0.41 | (−0.005, 0.000) |
+| Pair | Clear windows | Clear median / p95 / max (px) | Cloud windows | Cloud median / p95 (px) |
+|---|---|---|---|---|
+| R–G (43 vs 27) | 330 | 0.051 / 0.26 / 0.80 | 116 | 0.13 / 0.38 |
+| B–G (7 vs 27) | 226 | 0.049 / 0.17 / 0.61 | 70 | 0.11 / 0.25 |
+| R–B (43 vs 7) | 330 | 0.064 / 0.36 / 1.17 | 116 | 0.13 / 0.35 |
 
-The CV error of the R and B fields (accuracy expected away from textured
-tiles, e.g. over water) is 0.16 / 0.16 px median and 0.77 / 0.73 px p95. Before
-registration the B band was displaced from G by 4–45 px and the R band by
-3–22 px, varying over the frame.
+The other two measures bracket this. The self-consistency residual
+(`rgb.self_consistency_residual`, phase correlation again) is 0.014–0.036 px
+median, about 4× too optimistic. The CV error of the R and B fields
+(`rgb.field_cv_error_vs_reference`) is 0.16 px median, 0.73–0.77 px p95,
+pessimistic where tiles are dense. In short: on land, misregistration is ~0.05 px
+median with a tail to ~0.3 px; on cloud, ~0.12 px. No colour fringes are visible
+at full resolution.
 
 **Validation against ground truth** (`tests/test_registration.py`): on
 `tools/make_synthetic.py` data (known per-band shifts, 1–5 DN noise, faint land
@@ -479,7 +491,8 @@ band 1 is used as given.
 two segments (break between bands 44 and 45). Bands are displaced from each
 other by up to ~50 px, non-uniformly, with an along-track stretch of up to 10 %
 in the last ~450 rows for the other segment (§4). Corrected by co-registration
-to 0.01–0.04 px median between the RGB bands.
+to ~0.05 px median between the RGB bands on land and ~0.12 px on cloud, by an
+independent check (§4).
 
 **Quantisation.** The RGB bands span only 34–55 DN over the 1–99 % display
 stretch, so the display shows steps of 4–7 levels; G, the unresampled reference,
@@ -540,8 +553,9 @@ known per band better than ~±4 DN, which is comparable to the water signal.
   from the reference fall back to the coarse shift. This is reported
   (`field_from_tiles: false`, large residual). The challenge data (470–729 nm)
   is not affected.
-- Registration error is measured with the same estimator that drives the fit;
-  the ground-truth check is on synthetic data only.
+- The ground-truth check of registration is on synthetic data only. On the real
+  data the independent check measures only where there is scene structure (land
+  and cloud), not over open water, where the field is interpolated.
 - The per-channel stretch balances the scene average to grey; because the land
   is redder than the clouds, clouds look cyan. A white balance on cloud pixels
   neutralises them but tints the surface (§5); natural colour needs atmospheric

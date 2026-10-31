@@ -22,6 +22,7 @@ from .radiometry import (
 from .registration import (
     BandRegistration,
     ResidualStats,
+    independent_residual,
     register_cube,
     residual_misregistration,
 )
@@ -125,9 +126,6 @@ def registration_report(
     def rounded(a):
         return [round(float(v), 3) for v in a]
 
-    def stats(r: ResidualStats) -> dict:
-        return {k: round(v, 3) if isinstance(v, float) else v for k, v in vars(r).items()}
-
     rows = []
     for b, r in zip(bands, registrations, strict=True):
         rows.append(
@@ -150,8 +148,8 @@ def registration_report(
                     }
                     for f in r.passes
                 ],
-                "residual_after_registration": stats(r.residual),
-                "field_blocked_cv_error": stats(r.cv),
+                "residual_after_registration": _rounded(r.residual),
+                "field_blocked_cv_error": _rounded(r.cv),
             }
         )
     return {
@@ -164,41 +162,49 @@ def registration_report(
     }
 
 
+def _rounded(stats: ResidualStats) -> dict:
+    """JSON-ready residual statistics, floats rounded to 0.001 px."""
+    return {k: round(v, 3) if isinstance(v, float) else v for k, v in vars(stats).items()}
+
+
 def rgb_registration_report(
     cube: np.ndarray,
     bands: list[BandInfo],
     chosen: dict[str, int],
     registrations: list[BandRegistration],
+    noise: list[float],
+    cloud: np.ndarray,
 ) -> dict:
-    """Registration error between the chosen R, G and B bands.
+    """Registration error between the chosen R, G and B bands, three ways.
 
     Args:
         cube: ``(n_bands, H, W)`` float32 registered bands.
         bands: Band metadata in cube order.
         chosen: Cube index per colour.
         registrations: Per-band results from ``register_cube``.
+        noise: Noise standard deviation per band, in cube order.
+        cloud: ``(H, W)`` bool cloud mask.
 
     Returns:
-        The chosen bands, the misregistration re-measured between each pair of
-        registered RGB bands, and each band's field CV error vs the reference.
+        The chosen bands; per pair the independent check (clear and cloudy
+        windows) and the self-consistency residual; per band the field's CV
+        error against the reference.
     """
     pairs = {"R-G": ("R", "G"), "B-G": ("B", "G"), "R-B": ("R", "B")}
-    measured = {
-        name: residual_misregistration(cube[chosen[a]], cube[chosen[b]])
-        for name, (a, b) in pairs.items()
-    }
+    independent, self_consistency = {}, {}
+    for name, (a, b) in pairs.items():
+        ref, mov = cube[chosen[a]], cube[chosen[b]]
+        check = independent_residual(ref, mov, noise[chosen[a]], cloud)
+        independent[name] = {region: _rounded(s) for region, s in check.items()}
+        self_consistency[name] = _rounded(residual_misregistration(ref, mov))
     return {
         "bands": {c: bands[k].band_id for c, k in chosen.items()},
-        "pairs_after_registration": {
-            name: {k: round(v, 3) if isinstance(v, float) else v for k, v in vars(r).items()}
-            for name, r in measured.items()
-        },
+        "independent_check": independent,
+        "self_consistency_residual": self_consistency,
         "field_cv_error_vs_reference": {
-            c: {k: round(v, 3) if isinstance(v, float) else v
-                for k, v in vars(registrations[k_].cv).items()}
-            for c, k_ in chosen.items()
+            c: _rounded(registrations[k].cv) for c, k in chosen.items()
         },
-    }  # fmt: skip
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -292,14 +298,6 @@ def main(argv: list[str] | None = None) -> int:
         bands[ref_index].wavelength_nm,
     )
     registrations = register_cube(corrected, valid, ref_index, args.workers)
-    stats = registration_report(bands, ref_index, registrations)
-    stats["rgb"] = rgb_registration_report(corrected, bands, chosen, registrations)
-    (args.output_dir / "registration_stats.json").write_text(json.dumps(stats, indent=2))
-    for pair, r in stats["rgb"]["pairs_after_registration"].items():
-        log.info(
-            "RGB %s misregistration: median %.3f px, p95 %.3f px (%d tiles)",
-            pair, r["median_px"], r["p95_px"], r["n_tiles"],
-        )  # fmt: skip
 
     # 5. One no-data footprint for both outputs: pixels valid in every band the
     #    RGB or the cloud mask uses. The cloud mask also needs the longest band
@@ -326,7 +324,23 @@ def main(argv: list[str] | None = None) -> int:
         cloud.ratio_threshold,
     )
 
-    # RGB composite (per-channel percentile stretch; see README for why a white
+    # 6. Registration statistics; the RGB pairs are checked separately on clear
+    #    and cloudy windows, so they come after the cloud mask.
+    stats = registration_report(bands, ref_index, registrations)
+    noise = [s.noise for s in snr]
+    stats["rgb"] = rgb_registration_report(
+        corrected, bands, chosen, registrations, noise, mask.astype(bool)
+    )
+    (args.output_dir / "registration_stats.json").write_text(json.dumps(stats, indent=2))
+    for pair, r in stats["rgb"]["independent_check"].items():
+        log.info(
+            "RGB %s misregistration (independent check): clear median %.3f / p95 %.3f px "
+            "(%d windows), cloud median %.3f px",
+            pair, r["clear"]["median_px"], r["clear"]["p95_px"], r["clear"]["n_tiles"],
+            r["cloud"]["median_px"],
+        )  # fmt: skip
+
+    # 7. RGB composite (per-channel percentile stretch; see README for why a white
     # balance on the cloud mask was tried and not kept)
     rgb = rgb_composite(corrected, weights, footprint)
     write_tiff(args.output_dir / "rgb_image.tif", rgb, photometric="rgb")
@@ -336,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         100 * footprint.mean(),
     )
 
-    # 6. Optional ship detection: not implemented (see README §7)
+    # Optional ship detection: not implemented (see README §7)
     return 0
 
 

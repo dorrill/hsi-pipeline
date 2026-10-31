@@ -11,7 +11,13 @@ from scipy import ndimage
 
 from hsi_pipeline.io import load_cube, load_metadata
 from hsi_pipeline.radiometry import apply_radiometric_correction, validity_masks
-from hsi_pipeline.registration import MIN_PEAK, estimate_shift, register_band
+from hsi_pipeline.registration import (
+    MIN_PEAK,
+    estimate_shift,
+    independent_residual,
+    lucas_kanade_shift,
+    register_band,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -36,6 +42,30 @@ def test_estimate_shift_subpixel_with_noise(shift):
     est, peak = estimate_shift(ref + rng.normal(0, 0.05, ref.shape), mov)
     assert est == pytest.approx(shift, abs=0.05)
     assert peak > MIN_PEAK
+
+
+@pytest.mark.parametrize("shift", [(0.0, 0.0), (0.3, -0.6), (-1.2, 0.45)])
+def test_lucas_kanade_recovers_subpixel_shift_across_gain_and_offset(shift):
+    """The independent check recovers a known shift although the bands differ in gain/offset."""
+    rng = np.random.default_rng(4)
+    ref = _texture((128, 128))
+    mov = 3.0 * _fourier_shift(ref, shift) + 10.0 + rng.normal(0, 0.05, ref.shape)
+    pad = 4
+    est = lucas_kanade_shift(ref[32:96, 32:96], mov[32 - pad : 96 + pad, 32 - pad : 96 + pad])
+    assert est == pytest.approx(shift, abs=0.02)
+
+
+def test_independent_residual_splits_clear_and_cloud():
+    """Windows are reported by region; textureless windows are skipped."""
+    ref = _texture((256, 256))
+    mov = _fourier_shift(ref, (0.25, 0.0))
+    ref[:, 128:] = 0.0  # flat: the third column of windows is skipped
+    cloud = np.zeros(ref.shape, bool)
+    cloud[:128] = True  # windows start at rows 4, 68, 132: the first two are cloudy
+    out = independent_residual(ref, mov, reference_noise=0.05, cloud=cloud)
+    assert (out["cloud"].n_tiles, out["clear"].n_tiles) == (4, 2)
+    for stats in out.values():
+        assert stats.median_px == pytest.approx(0.25, abs=0.03)
 
 
 def test_estimate_shift_ignores_gain_and_offset():
