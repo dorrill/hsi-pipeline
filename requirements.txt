@@ -1,0 +1,6 @@
+# Exact versions the outputs were produced and reproduced with (Python 3.13).
+# pyproject.toml gives the minimum versions; other versions should give the same
+# results to within floating-point rounding, but not necessarily byte for byte.
+numpy==2.5.4
+scipy==1.18.1
+tifffile==2026.10.15

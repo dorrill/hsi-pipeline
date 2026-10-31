@@ -8,7 +8,8 @@ and reports co-registration accuracy between the selected RGB bands.
 
 ```bash
 python3.13 -m venv .venv && source .venv/bin/activate
-pip install -e .            # add ".[dev]" for tests, ".[viz]" for plots
+pip install -r requirements.txt   # the exact versions the outputs were made with
+pip install -e .                  # add ".[dev]" for tests, ".[viz]" for plots
 hsi-pipeline --input-dir inputs --output-dir outputs
 ```
 
@@ -25,8 +26,9 @@ cloud overlay, …) are written to `outputs/figures/` by
 
 The run is deterministic: no random state is used in the pipeline, and the
 synthetic generator is seeded. A fresh clone installed into a new Python 3.13 venv
-reproduces all six outputs byte-for-byte. On the challenge data a run takes ~2.5 min and
-~1.6 GB with the default 4 registration workers (`--workers N`; ~0.5 GB each).
+with `requirements.txt` reproduces all six outputs byte-for-byte. On the challenge
+data a run takes ~2.5 min and ~1.9 GB peak with the default 4 registration workers
+(`--workers N`).
 
 ## Outputs
 
