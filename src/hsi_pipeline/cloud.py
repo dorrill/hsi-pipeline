@@ -39,7 +39,8 @@ from scipy import ndimage
 
 #: Brightness test, in standard deviations of the water cluster above its mode.
 #: The noise of water alone exceeds 5 sigma with probability ~3e-7; on the
-#: challenge data 5 sigma is ~6 radiance units, about 9 % above water.
+#: challenge data 5 sigma is ~5.4 radiance units (~9 DN at 556 nm): about the
+#: water's own signal above the ~112 DN pedestal, though only ~8 % of its full level.
 BRIGHTNESS_SIGMA = 5.0
 
 #: Spatial averaging before the per-pixel tests (px). Single-pixel SNR is ~6 in

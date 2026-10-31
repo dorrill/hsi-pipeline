@@ -51,7 +51,10 @@ OFFSET_OUTLIER_Z = 5.0
 #: logged as spectrally inconsistent (diagnostic only, nothing is changed). In the
 #: challenge data, bands with sound metadata reach at most 0.25 (band 2, whose
 #: prediction is pulled by band 1, and the 628/632 nm gain-group boundary);
-#: band 1 sits at 0.72.
+#: band 1 sits at 0.72. The corrected level is mostly gain x the ~112 DN pedestal
+#: the offsets leave in, so where the gain jumps (band 1 has twice band 2's) the
+#: residual tracks the gain ratio, not the spectrum: with 100 DN removed band 1
+#: drops to 0.23. The offset repairs do not change for any pedestal 0-112 DN.
 CONTINUITY_TOLERANCE = 0.5
 
 N_DN_LEVELS = 256

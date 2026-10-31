@@ -17,8 +17,8 @@ SNR definition:
 
     Both scale with the gain and ignore the offset, so the ratio does not
     depend on the radiometric calibration, which is doubtful for some bands
-    (band 1's gain, a ~110 DN floor in every band). A mean-based SNR would be
-    dominated by that floor.
+    (the repaired offsets, a ~112 DN pedestal in every band that the offsets do
+    not remove). A mean-based SNR would be dominated by that pedestal.
 
 Selection:
     The band with the highest SNR inside each colour window (``RGB_WINDOWS_NM``).

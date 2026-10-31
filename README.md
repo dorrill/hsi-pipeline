@@ -94,9 +94,14 @@ Each repair is logged as a warning and recorded in `band_summary.json`
 `--keep-metadata-offsets` reports without repairing.
 
 Every band also gets a leave-one-out `continuity_residual`. Bands above 0.5 are
-logged but **not** changed: band 1 (470 nm, gain 1.368, about twice its
-neighbours) comes out 72 % above band 2, which suggests a wrong gain, but a gain
-cannot be re-estimated from neighbours without assuming the scene spectrum.
+logged but **not** changed. Only band 1 (470 nm) is, at 72 % above band 2, and
+this is the pedestal, not a wrong gain: the corrected level is mostly gain × the
+~112 DN floor the offsets leave in (see Instrument artifacts, "DN floor"), and
+band 1's gain is 1.85× band 2's (1.368 vs 0.739). With 100 DN removed from every
+band before the comparison, band 1's residual falls to 0.23. Where the gain jumps
+(here, and at the 628/632 nm boundary) the residual therefore compares gains as
+much as spectra. The repair decision is not affected: the same five offsets are
+replaced for any pedestal from 0 to 112 DN.
 
 #### Column destriping (beyond the supplied calibration)
 Every band has single-column stripes of ~2 DN, twice the random noise (~1 DN
@@ -270,8 +275,8 @@ destriping they count as scene contrast instead, so destriping lowers SNR by
 0–17 % per band (most in the noisier bands) but does not change the RGB choice.
 
 `SNR = contrast / noise`. Gain cancels and offset drops out, so the ranking does
-not depend on the doubtful calibration (band 1's gain, the ~110 DN floor). A
-mean-based SNR would mostly measure that floor.
+not depend on the doubtful calibration (the repaired offsets, the ~112 DN
+pedestal). A mean-based SNR would mostly measure that pedestal.
 
 **Selection**: the highest-SNR band in each conventional colour window, blue
 450–495, green 495–570, red 620–700 nm:
@@ -372,6 +377,123 @@ ring-shaped neighbourhood), keep those of plausible ship size and elongation, an
 score confidence from contrast and shape. Wakes and the column banding over
 water would be the main false-alarm sources.
 
+## Instrument artifacts
+
+The supplied calibration is one gain and one offset per band. Two corrections
+in the pipeline go **beyond it**, both empirical and both switchable:
+**column destriping** (`--no-destripe` turns it off) and the **repair of five
+metadata offsets** (`--keep-metadata-offsets`). With both flags the outputs use
+the supplied calibration only. Everything else below is documented but not
+corrected.
+
+| Artifact | Size | Corrected? |
+|---|---|---|
+| Single-column stripes | ~2 DN, 2× the noise | Yes, empirically (destriping) |
+| Wider column banding | a few to ~20 columns | No |
+| Right-edge fall-off | −1 to −9 DN, last ~250 columns | No |
+| Smooth level change across the swath | −9 to +3 DN over water | No |
+| Wrong metadata offsets (bands 42–44, 75–76) | +41 to +68 | Yes, empirically (replaced) |
+| Band-to-band geometry (two detector segments) | up to ~50 px, 10 % stretch | Yes (co-registration) |
+| 8-bit quantisation of a narrow DN range | 34–55 DN over the display stretch | Optional (`--average-neighbours`) |
+| ~112 DN pedestal in every band | 1st percentile 108–126 DN | No (offset-invariant methods) |
+| No-data rows and borders, saturation | ≤ 0.03 % saturated | Masked (§3) |
+
+**Single-column stripes.** *Observed*: ~2 DN per-column offsets in every band,
+the same pattern in all bands (r ≈ 0.91), constant down each column: a
+detector-column offset. *Diagnosed* from column profiles and verified split-half
+(even rows estimate, odd rows test). *Corrected* by subtracting per-column
+offsets estimated from row residuals (§2), which lowers the stripe amplitude ~10×
+(G 1.15 → 0.11, floor 0.024). The metadata has no per-column terms, so this is an
+empirical correction on top of the supplied calibration. *Limits*: the column
+pattern is estimated from the scene itself; a scene edge that stays in one column
+for most of the frame would bias the columns next to it.
+
+**Wider column banding.** *Observed*: after destriping, soft bands a few to ~20
+columns wide remain, most visible over water (`diagnostics/destripe_crop.png`).
+*Not corrected*: any per-column method has to separate the column pattern from
+the scene with a window across the track, and a pattern that varies more slowly
+than the window is indistinguishable from scene content that is constant along
+the track. A flat field (or a uniform target) would be needed.
+
+**Right-edge fall-off.** *Observed*: in the last ~250 columns every band drops,
+by 8.4–9.0 corrected units at 470 nm, 3.2–3.8 in B (band 7), 4.2 in G (27),
+1.5–1.8 in R (43) and 0.6–0.9 at 729 nm. *Diagnosed* with
+`tools/ramp_diagnostics.py` (`right_edge_change_per_row_block` in
+`diagnostics/ramp_stats.json`): the change from columns 1792–1855 to 1984–2039
+is negative in every band in each of the four 256-row blocks of the city (rows
+0–1023), whose land cover differs, and agrees between blocks within 0–17 % for
+the RGB bands (up to 40 % for the bands with the smallest drop), so it does not
+appear to follow the land cover. Rows with bay or salt ponds at the edge do
+follow the scene. In raw DN the drop is 5–9 DN in B, G and R (1–5 DN at
+729 nm); as a gain loss that would mean 20–50 % vignetting on signal only
+~15–30 DN above the floor, so an **additive** effect is more likely. Its
+blue-heavy spectrum fits either a dark-level fall-off at the detector edge or
+less atmospheric path radiance towards that edge; the data cannot tell them
+apart. *Effect*: G's display stretch spans only 34 DN against 55 for R, so the
+same few DN darken G by ~37 display levels and R by ~14, which is the magenta
+right edge of `rgb_image.tif`. *Not corrected*: an empirical fit would be made on
+the city itself, with the cause unknown; dark frames or the viewing geometry
+would be needed.
+
+**Smooth level change across the swath.** *Observed*: over open water (dark at
+556 and 729 nm, away from clouds; `diagnostics/water_profiles.png`) the level
+changes smoothly across the swath. Relative to columns 1000–1500, the outermost
+water columns (27–47) are lower in all bands but 548–551 nm (within 0.4 DN),
+by up to 9 DN (median 3.7;
+B 6.7, G 3.0, R 6.1 DN), and columns 650–750 are 0.1–3.4 DN higher. The plot
+shows this as only −7 to +3 % because it divides by the full level, which is
+mostly the ~112 DN pedestal (see "DN floor"): water sits just 2–23 DN (median 5)
+above it, so the change is comparable to the water signal itself. The bands do
+not share one profile: over columns 100–250 they differ by up to 8 DN, with the
+blue and 602–628 nm bands lowest, so colour changes as well as brightness.
+*Diagnosed* on water because it is a single, nearly uniform surface. The
+review's suggested fit of each band against the mean of all bands, column by
+column (`diagnostics/ramp_profiles.png`), turned out to follow the scene instead:
+its profiles jump where the columns change from ocean and cumulus to land, and
+the fitted change depends on the brightness at which it is evaluated.
+*Interpretation*: as a gain change it would be tens of per cent of the signal, so,
+as at the right edge, an additive change is more likely: a real difference
+between open-ocean and bay water, varying path radiance, or a dark level that
+varies across the detector. The data cannot separate them. *Not corrected*.
+Past column ~1550 the shallow south bay has a different spectrum.
+
+**Metadata offsets.** Bands 42–44 and 75–76 carry offsets of +41 to +68 while
+all others lie in −7…+3, which would put a 2.5× step into the spectrum. Their raw
+DNs are continuous with the neighbours (r = 0.96–0.99), so the offsets are
+replaced by the median of the normal ones (§2). This is the second correction
+beyond the supplied calibration. Band 1's corrected level is 72 % above band 2's,
+which first looked like a wrong gain; it is explained by the pedestal (§2), and
+band 1 is used as given.
+
+**Band-to-band geometry.** Each band is a separate strip of detector rows, in
+two segments (break between bands 44 and 45). Bands are displaced from each
+other by up to ~50 px, non-uniformly, with an along-track stretch of up to 10 %
+in the last ~450 rows for the other segment (§4). Corrected by co-registration
+to 0.01–0.04 px median between the RGB bands.
+
+**Quantisation.** The RGB bands span only 34–55 DN over the 1–99 % display
+stretch, so the display shows steps of 4–7 levels; G, the unresampled reference,
+has 63 distinct values. The noise (~1 DN) dithers the steps, so they do not
+show as contours. `--average-neighbours 1` removes the steps and halves the G
+display noise (§5); off by default.
+
+**DN floor.** *Observed*: every band sits on a floor that the metadata offsets
+(−7…+3) do not remove; the 1st percentile of raw DN is 108–126 (median 111) and
+no pixel is below 103. *Diagnosed* as a fixed electronic offset (a pedestal),
+not light: a fixed radiance would read ∝ 1/gain, about 5× higher in the
+low-gain bands, but a fit over the 48 bands gives 112 + 0.7/gain DN. Consistent
+with that, the noise near the floor is ~0.9 DN and grows with the signal above
+it (band 40: 0.9 DN at 116 DN, 1.6 DN at 204 DN), as shot noise should, while a
+constant adds none. Bias and dark current cannot be told apart without dark
+frames. *Effect*: corrected values include about gain × 112, so they are not
+absolute radiance, and anything that divides by a level or compares levels
+between bands of different gain is biased. The pipeline's steps are
+offset-invariant (destriping, SNR, registration with tile means removed, RGB
+stretch, cloud mask with a water-relative brightness test and a cloud line with
+an intercept); the exception is the continuity residual of the offset check
+(§2), whose repair decision is unaffected. *Not corrected*: the pedestal is not
+known per band better than ~±4 DN, which is comparable to the water signal.
+
 ## Assumptions
 - The gain/offset convention is linear (see above).
 - DN = 0 is fill, not real signal.
@@ -394,9 +516,12 @@ water would be the main false-alarm sources.
 - Repaired offsets are a consistent replacement (the median of the normal
   offsets), not a recalibration; absolute levels in those bands carry an
   uncertainty of a few units.
-- Band 1's gain looks wrong but is used as given.
-- Destriping removes single-column stripes only; banding wider than 15 columns
-  remains.
+- The ~112 DN pedestal is not removed, so corrected values are relative, not
+  absolute radiance; band ratios or level comparisons across a gain jump would be
+  biased (none of the outputs depend on them).
+- Destriping is an empirical correction beyond the supplied calibration and
+  removes single-column stripes only; banding a few to ~20 columns wide remains
+  (see Instrument artifacts).
 - Every band is registered directly to one reference. Where a band's contrast is
   inverted relative to the reference (e.g. land/sea across the vegetation red
   edge), few tiles correlate: on the synthetic 400–1000 nm data, bands > 500 nm
@@ -408,11 +533,12 @@ water would be the main false-alarm sources.
 - The per-channel stretch balances the scene average to grey; because the land
   is redder than the clouds, clouds look cyan. A white balance on cloud pixels
   neutralises them but tints the surface (§5); natural colour needs atmospheric
-  correction. A slow across-track response difference between bands
-  (reddish top-right corner) and the wider column banding (coloured streaks
-  over water) are not corrected.
-- Each colour uses one band. Averaging neighbouring bands would raise the SNR
-  further, at the cost of spectral purity and an extra registration step.
+  correction. The right-edge fall-off (magenta right edge) and the wider column
+  banding (coloured streaks over water) are not corrected (see Instrument
+  artifacts).
+- By default each colour uses one band. `--average-neighbours` averages in-window
+  neighbours, which lowers the noise but not the column banding, at a small
+  cost in spectral purity.
 - Cloud mask: bright, spectrally grey man-made surfaces of cloud-like size
   (a few white roofs, the Shelter Island marina) are false alarms; the faintest
   haze at cloud margins is missed (below the 5σ brightness test). Thin cloud over
@@ -438,6 +564,7 @@ src/hsi_pipeline/   io.py (loading), radiometry.py (correction, validity, destri
                     cli.py (entry point)
 tools/              make_figures.py (summary figures, needs the viz extra)
                     destripe_diagnostics.py (destriping before/after, viz extra)
+                    ramp_diagnostics.py (cross-track ramp diagnosis, viz extra)
                     make_synthetic.py (test data with known per-band shifts)
 tests/              unit tests
 ```
