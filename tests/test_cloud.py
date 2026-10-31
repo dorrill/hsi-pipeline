@@ -4,17 +4,26 @@ import numpy as np
 import pytest
 from scipy import ndimage
 
-from hsi_pipeline.cloud import BUFFER_PX, cloud_mask, valley_threshold, water_mode_and_sigma
+from hsi_pipeline.cloud import (
+    BUFFER_PX,
+    cloud_mask,
+    valley_threshold,
+    water_mode_and_sigma,
+    water_reference,
+)
 
 WATER = np.array([70.0, 40.0])  # (L556, L729)
-CLOUD = np.array([95.0, 64.0])  # thick cloud: on the water-cloud mixing line
-LAND = np.array([78.0, 50.0])  # above the line: relatively more 729 nm
+CLOUD = np.array([95.0, 64.0])  # thick cloud: added light ratio 24 / 25 = 0.96
+LAND = np.array([78.0, 52.0])  # added light ratio 12 / 8 = 1.5: relatively more 729 nm
 
 
 def _scene(seed=0, size=512):
-    """Water with land patches, soft clouds, a thin bright line and a tiny blob.
+    """Banded water with land patches, soft clouds, a thin bright line and a tiny blob.
 
-    Returns green, red-edge, the true cloud fraction, and masks of the decoys.
+    The water level varies across the columns by a ramp and column banding,
+    several times the noise, as in the real capture.
+
+    Returns green, red-edge, the cloud fraction, and masks of land and the decoys.
     """
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[0:size, 0:size]
@@ -24,31 +33,26 @@ def _scene(seed=0, size=512):
         f = np.maximum(f, np.clip(1.3 - np.hypot(yy - cy, xx - cx) / r, 0, 1))
     line = (np.abs(yy - 470) <= 1) & (xx > 200) & (xx < 380)  # 3 px wide
     blob = (np.abs(yy - 60) <= 2) & (np.abs(xx - 320) <= 2)  # 25 px
-    base = np.where(land[..., None], LAND, WATER)
+    columns = 3.0 * xx / size + rng.normal(0, 0.7, size)[xx]  # ramp + banding
+    base = np.where(land[..., None], LAND, WATER) + columns[..., None]
     pixel = (1 - f[..., None]) * base + f[..., None] * CLOUD
     pixel[line | blob] = CLOUD  # spectrally cloud-like but the wrong shape
     noise = rng.normal(0, 1.0, (size, size, 2))
     return pixel[..., 0] + noise[..., 0], pixel[..., 1] + noise[..., 1], f, land, line | blob
 
 
-def test_cloud_mask_finds_clouds_and_rejects_decoys():
-    """Definite cloud is found; land, thin and tiny features are not; extras are buffer only.
-
-    The brightness test is sensitive to cloud fractions well below 0.3 (5 sigma
-    of the smoothed water noise), so thin cloud edges are flagged too, plus the
-    ``BUFFER_PX`` dilation.
-    """
+def test_cloud_mask_finds_thin_cloud_and_rejects_decoys():
+    """Thin and thick cloud are found; land, banded water and small features are not."""
     g, n, f, land, decoys = _scene()
     mask, stats = cloud_mask(g, n, np.ones(g.shape, bool))
     m = mask.astype(bool)
-    assert m[f > 0.3].all()
+    assert m[f > 0.2].all()  # thin cloud: a fifth of a cloud adds ~5 units of green
     assert not (m & land & (f == 0)).any()
     assert not (m & decoys).any()
     near_cloud = ndimage.binary_dilation(f > 0, iterations=BUFFER_PX + 1)
-    assert not (m & ~near_cloud).any()
-    assert stats.cloud_line_slope == pytest.approx(
-        (CLOUD[1] - WATER[1]) / (CLOUD[0] - WATER[0]), abs=0.1
-    )
+    assert not (m & ~near_cloud).any()  # no false alarms on the banded water
+    assert stats.cloud_ratio_mode == pytest.approx(0.96, abs=0.1)
+    assert stats.land_ratio_mode == pytest.approx(1.5, abs=0.15)
 
 
 def test_cloud_mask_is_zero_on_nodata():
@@ -60,18 +64,30 @@ def test_cloud_mask_is_zero_on_nodata():
     assert not mask[~valid].any()
 
 
+def test_water_reference_follows_columns_and_bridges_land():
+    """Per-column level is recovered; columns without water are interpolated."""
+    rng = np.random.default_rng(3)
+    level = np.linspace(60, 66, 300)
+    image = level[None, :] + rng.normal(0, 0.5, (512, 300))
+    water = np.ones(image.shape, bool)
+    water[:, 140:160] = False  # a strip of land
+    ref = water_reference(image, water)
+    assert np.abs(ref - level[None, :]).max() < 0.15
+
+
 def test_valley_threshold_splits_unequal_modes():
     """The valley lies between the modes even when one class is 10x larger (Otsu does not)."""
     rng = np.random.default_rng(1)
     small, large = rng.normal(1.0, 0.5, 10_000), rng.normal(4.0, 0.8, 100_000)
-    thr = valley_threshold(np.concatenate([small, large]))
+    thr, low, high = valley_threshold(np.concatenate([small, large]))
     assert 1.8 < thr < 2.6
+    assert low == pytest.approx(1.0, abs=0.2) and high == pytest.approx(4.0, abs=0.2)
 
 
 def test_water_mode_and_sigma_ignore_bright_tail():
     """The dark-side spread measures the water noise, not the bright classes."""
     rng = np.random.default_rng(2)
     sample = np.concatenate([rng.normal(70, 1.2, 200_000), rng.uniform(75, 110, 50_000)])
-    mode, sigma = water_mode_and_sigma(ndimage.uniform_filter1d(sample, 1))
+    mode, sigma = water_mode_and_sigma(sample)
     assert mode == pytest.approx(70, abs=0.3)
     assert sigma == pytest.approx(1.2, rel=0.1)

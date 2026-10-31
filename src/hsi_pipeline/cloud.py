@@ -1,29 +1,26 @@
-"""Explainable cloud mask from visible bands: brightness, spectral shape, and shape.
+"""Explainable cloud mask from visible bands: brightness, colour of the added light, shape.
 
 The capture has no NIR or SWIR, so the usual cloud tests (high NIR
-reflectance, SWIR cirrus bands) are not available. Two visible-range facts are:
+reflectance, SWIR cirrus bands) are not available. The mask uses the green
+band (556 nm) and the longest band (729 nm) and three facts:
 
-* Clouds are bright: much brighter than the water they lie over.
-* Clouds are spectrally flat in reflectance, so their radiance follows the
-  solar spectrum. Every land surface in the scene (vegetation's red edge,
-  soils, roofs, sand) gets relatively brighter towards the longest band
-  (729 nm), so for the same green radiance it has *more* 729 nm radiance.
+* Water is dark at 729 nm, and clouds lie over water in this scene. Every
+  pixel is compared with the water *in its own column*: the capture's level
+  varies across the swath (a smooth ramp and column banding of a few units),
+  which is several times the noise, and comparing within a column removes it.
+* Clouds are bright: a cloud adds light to the water below it. The brightness
+  test is the green radiance added over the water, ``dg``, in units of the
+  local noise.
+* Clouds are spectrally flat in reflectance, so the light they add has the
+  solar spectrum, while every land surface here (vegetation's red edge, soil,
+  roofs, sand) adds relatively more 729 nm light. Radiances add, so a pixel
+  that is a fraction ``f`` cloud over water adds ``f * (cloud - water)`` in
+  both bands, and the ratio ``r = dn / dg`` of the added light is the same for
+  thin and thick cloud. Among bright pixels the histogram of ``r`` is bimodal
+  (cloud ~0.7, land ~1.0 on the challenge data); the threshold is the valley
+  between the modes, so it is set by the data rather than by hand.
 
-Because radiances add, every mixture of water and cloud (thin cloud, cloud
-edges) lies on one straight line in the plane L(729) vs L(556): the *cloud
-line*. Land lies above it. The mask uses two features:
-
-1. ``brightness``: green radiance above the water mode, in units of the water
-   cluster's noise. Test: ``> BRIGHTNESS_SIGMA``.
-2. ``red_edge_excess``: height of the pixel above the cloud line, in 729 nm
-   radiance. Among bright pixels its histogram is bimodal (cloud ~ +1, land
-   ~ +4 on the challenge data); the threshold is the minimum of the smoothed
-   histogram between the two modes, so it is set by the data rather than by
-   hand. (Otsu's method was tried first and put the split at +3.0, inside the
-   land mode, because it is biased towards the larger class.)
-
-Clean-up is morphological, using the fact that clouds are compact blobs while
-the remaining false alarms (beach strip, roof edges) are thin lines: an
+Clean-up is morphological, using the fact that clouds are compact blobs: an
 opening, removal of objects smaller than ``MIN_CLOUD_PX``, hole filling, and a
 ``BUFFER_PX`` dilation that covers mixed edge pixels and the small cloud
 parallax between bands (clouds sit above the ground the bands were registered
@@ -32,37 +29,50 @@ to).
 
 from __future__ import annotations
 
+import logging
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
 from scipy import ndimage
 
-#: Brightness test, in standard deviations of the water cluster above its mode.
-#: The noise of water alone exceeds 5 sigma with probability ~3e-7; on the
-#: challenge data 5 sigma is ~5.4 radiance units (~9 DN at 556 nm): about the
-#: water's own signal above the ~112 DN pedestal, though only ~8 % of its full level.
+log = logging.getLogger(__name__)
+
+#: Brightness test: green radiance added over the water, in units of the water's
+#: noise. Noise alone exceeds 5 sigma with probability ~3e-7.
 BRIGHTNESS_SIGMA = 5.0
 
 #: Spatial averaging before the per-pixel tests (px). Single-pixel SNR is ~6 in
 #: these bands; a 3x3 mean triples it at the cost of a 1 px edge blur.
 SMOOTH_PX = 3
 
-#: The cloud line is fitted to the lower envelope (this percentile of 729 nm
-#: radiance) of brightness bins of this width (radiance units), using bins with
-#: at least _MIN_BIN_PX pixels.
-ENVELOPE_PERCENTILE = 5.0
-_BIN_WIDTH = 2.0
-_MIN_BIN_PX = 200
+#: Water pixels: 729 nm radiance less than this many standard deviations of the
+#: dark cluster above its mode. Cloud and land are bright at 729 nm.
+WATER_SIGMA = 3.0
 
-#: Smoothing of the excess histogram (bins) before locating its modes, and the
+#: The water reference is a median per column in row blocks of this height,
+#: interpolated between blocks. Columns are where the level varies (ramp,
+#: banding); blocks follow slower along-track changes (ocean vs bay water, and
+#: the warped bands' banding, which shifts by a few px over the frame).
+REFERENCE_BLOCK_PX = 256
+
+#: A column in a block needs this fraction of water pixels for its own median;
+#: otherwise it is interpolated from the neighbouring columns.
+MIN_WATER_FRACTION = 0.25
+
+#: Pixels at least this many sigma bright set the ratio histogram: the ratio of
+#: faint pixels is too noisy to show the two modes.
+STRONG_SIGMA = 20.0
+
+#: Smoothing of the ratio histogram (bins) before locating its modes, and the
 #: minimum height of a mode relative to the highest one.
 _HIST_SMOOTH_BINS = 2.0
 _MIN_MODE_FRACTION = 0.05
 
 #: Morphological opening radius (px). The disk is 7 px across; after the 3x3
 #: mean widens features by 2 px, it removes features up to ~4 px wide in the
-#: original image (beach strip, roof edges, piers). Clouds that narrow would be
-#: removed by MIN_CLOUD_PX anyway.
+#: original image (roof edges, piers). Clouds that narrow would be removed by
+#: MIN_CLOUD_PX anyway.
 OPENING_RADIUS_PX = 3
 
 #: Smallest cloud object kept (px), ~ 10 x 10 px.
@@ -77,22 +87,22 @@ class CloudStats:
     """Parameters found on the data and summary of the mask.
 
     Attributes:
-        water_mode: Green radiance of the water mode.
-        water_sigma: Noise of the water cluster in green radiance.
-        brightness_threshold: Green radiance threshold used.
-        cloud_line_slope: Slope of the cloud line, L(729) per L(556).
-        cloud_line_intercept: Intercept of the cloud line.
-        excess_threshold: Threshold on the red-edge excess (histogram valley).
+        water_fraction: Fraction of valid pixels used as water reference.
+        noise_sigma: Noise of the smoothed green band over water.
+        brightness_threshold: Added green radiance above which a pixel is bright.
+        cloud_ratio_mode: Mode of the added-light ratio ``dn / dg`` for cloud.
+        land_ratio_mode: Mode of the ratio for land.
+        ratio_threshold: Histogram valley between the two modes.
         cloud_fraction: Fraction of valid pixels flagged as cloud.
         n_objects: Number of connected cloud objects.
     """
 
-    water_mode: float
-    water_sigma: float
+    water_fraction: float
+    noise_sigma: float
     brightness_threshold: float
-    cloud_line_slope: float
-    cloud_line_intercept: float
-    excess_threshold: float
+    cloud_ratio_mode: float
+    land_ratio_mode: float
+    ratio_threshold: float
     cloud_fraction: float
     n_objects: int
 
@@ -125,17 +135,18 @@ def otsu_threshold(values: np.ndarray, bins: int = 256) -> float:
     return float(edges[1:][np.argmax(between)])
 
 
-def valley_threshold(values: np.ndarray, bins: int = 200) -> float:
+def valley_threshold(values: np.ndarray, bins: int = 200) -> tuple[float, float, float]:
     """Minimum of the smoothed histogram between its two outermost modes.
 
-    Falls back to :func:`otsu_threshold` if the histogram has a single mode.
+    Falls back to :func:`otsu_threshold` (modes NaN) if the histogram has a
+    single mode, e.g. a scene without land or without cloud.
 
     Args:
         values: 1-D sample.
         bins: Histogram bins.
 
     Returns:
-        The threshold, in the units of ``values``.
+        ``(threshold, low_mode, high_mode)`` in the units of ``values``.
     """
     lo_v, hi_v = np.percentile(values, [0.5, 99.5])
     hist, edges = np.histogram(values, bins=bins, range=(lo_v, hi_v))
@@ -144,28 +155,76 @@ def valley_threshold(values: np.ndarray, bins: int = 200) -> float:
     is_mode = (h[1:-1] >= h[:-2]) & (h[1:-1] >= h[2:]) & (h[1:-1] > _MIN_MODE_FRACTION * h.max())
     modes = np.flatnonzero(is_mode) + 1
     if len(modes) < 2:
-        return otsu_threshold(values)
+        log.warning("Ratio histogram has a single mode; falling back to Otsu's threshold")
+        return otsu_threshold(values), np.nan, np.nan
     a, b = modes[0], modes[-1]
-    return float(centres[a + np.argmin(h[a : b + 1])])
+    return float(centres[a + np.argmin(h[a : b + 1])]), float(centres[a]), float(centres[b])
 
 
-def water_mode_and_sigma(green: np.ndarray) -> tuple[float, float]:
-    """Mode of the dominant dark cluster and its noise from the dark side.
+def water_mode_and_sigma(values: np.ndarray) -> tuple[float, float]:
+    """Mode of the dominant dark cluster and its spread from the dark side.
 
     The dark side of the mode is free of cloud and land, so the half-normal
     spread below the mode measures the water cluster's own noise.
 
     Args:
-        green: 1-D sample of smoothed green radiance.
+        values: 1-D sample of smoothed radiance (or of radiance above the water).
 
     Returns:
-        ``(mode, sigma)`` in radiance units.
+        ``(mode, sigma)`` in the units of ``values``.
     """
-    hist, edges = np.histogram(green, bins=400)
+    hist, edges = np.histogram(values, bins=400)
     k = int(np.argmax(hist))
     mode = (edges[k] + edges[k + 1]) / 2
-    below = green[green <= mode]
+    below = values[values <= mode]
     return float(mode), float(np.sqrt(np.mean((below - mode) ** 2)))
+
+
+def _fill_gaps(profile: np.ndarray) -> np.ndarray:
+    """Linear interpolation over the NaNs of a 1-D profile (unchanged if all NaN)."""
+    ok = np.isfinite(profile)
+    if ok.all() or not ok.any():
+        return profile
+    x = np.arange(len(profile))
+    return np.interp(x, x[ok], profile[ok])
+
+
+def water_reference(image: np.ndarray, water: np.ndarray) -> np.ndarray:
+    """Level of the water in each column, following slow changes along the rows.
+
+    The median over water pixels per column and ``REFERENCE_BLOCK_PX`` row
+    block, interpolated over columns without enough water (land) and blocks
+    without any, then linearly between block centres along the rows.
+
+    Args:
+        image: ``(H, W)`` float smoothed radiance.
+        water: ``(H, W)`` bool water pixels.
+
+    Returns:
+        ``(H, W)`` float64 water level at every pixel.
+
+    Raises:
+        ValueError: If no column has enough water.
+    """
+    h, w = image.shape
+    block_h = min(REFERENCE_BLOCK_PX, h)
+    n_blocks = h // block_h
+    blocks = np.where(water, image, np.nan)[: n_blocks * block_h].reshape(n_blocks, block_h, w)
+    with warnings.catch_warnings():  # columns without water: all-NaN medians
+        warnings.simplefilter("ignore", RuntimeWarning)
+        level = np.nanmedian(blocks, axis=1)
+    level[np.isfinite(blocks).mean(axis=1) < MIN_WATER_FRACTION] = np.nan
+    if np.isnan(level).all():
+        raise ValueError("No water found to use as reference")
+    level = np.apply_along_axis(_fill_gaps, 1, level)  # across columns, per block
+    level = np.apply_along_axis(_fill_gaps, 0, level)  # across blocks, per column
+
+    # Row y lies between the centres of blocks k0 and k1, at fraction t.
+    pos = np.clip((np.arange(h) + 0.5) / block_h - 0.5, 0, n_blocks - 1)
+    k0 = np.floor(pos).astype(int)
+    k1 = np.minimum(k0 + 1, n_blocks - 1)
+    t = (pos - k0)[:, None]
+    return (1 - t) * level[k0] + t * level[k1]
 
 
 def cloud_mask(
@@ -184,51 +243,45 @@ def cloud_mask(
         parameters found on the data.
 
     Raises:
-        ValueError: If there are too few bright pixels to fit the cloud line.
+        ValueError: If no water is found to compare with.
     """
     g = _smooth(green, valid)
     n = _smooth(red_edge, valid)
     inner = ndimage.binary_erosion(valid, iterations=SMOOTH_PX)
 
-    mode, sigma = water_mode_and_sigma(g[inner])
-    bright_thr = mode + BRIGHTNESS_SIGMA * sigma
-    bright = inner & (g > bright_thr)
+    # 1. Water reference per column, and the light each pixel adds over it.
+    n_mode, n_sigma = water_mode_and_sigma(n[inner])
+    water = inner & (n < n_mode + WATER_SIGMA * n_sigma)
+    dg = g - water_reference(g, water)
+    dn = n - water_reference(n, water)
 
-    # Cloud line: lower envelope of L(729) vs L(556) above the water mode.
-    xs, ys = [], []
-    top = np.percentile(g[bright], 99.9) if bright.any() else bright_thr
-    for lo in np.arange(bright_thr, top, _BIN_WIDTH):
-        sel = bright & (g >= lo) & (g < lo + _BIN_WIDTH)
-        if sel.sum() >= _MIN_BIN_PX:
-            xs.append(lo + _BIN_WIDTH / 2)
-            ys.append(np.percentile(n[sel], ENVELOPE_PERCENTILE))
-    if len(xs) < 2:
-        raise ValueError("Too few bright pixels to fit the cloud line")
-    slope, intercept = np.polyfit(xs, ys, 1)
-    excess = n - (slope * g + intercept)
-    excess_thr = valley_threshold(excess[bright])
+    # 2. Brightness, in units of the noise measured on the water's dark side.
+    _, sigma = water_mode_and_sigma(dg[water])
+    bright = inner & (dg > BRIGHTNESS_SIGMA * sigma)
 
-    raw = bright & (excess < excess_thr)
-    disk = _disk(OPENING_RADIUS_PX)
-    mask = ndimage.binary_opening(raw, structure=disk)
-    labels, n_obj = ndimage.label(mask)
-    sizes = np.bincount(labels.ravel())
-    keep = sizes >= MIN_CLOUD_PX
+    # 3. Colour of the added light: low ratio = flat spectrum = cloud.
+    ratio = np.divide(dn, dg, out=np.full_like(dg, np.inf), where=bright)
+    strong = bright & (dg > STRONG_SIGMA * sigma)
+    ratio_thr, cloud_mode, land_mode = valley_threshold(ratio[strong])
+    raw = bright & (ratio < ratio_thr)
+
+    # 4. Shape: clouds are compact blobs.
+    mask = ndimage.binary_opening(raw, structure=_disk(OPENING_RADIUS_PX))
+    labels, _ = ndimage.label(mask)
+    keep = np.bincount(labels.ravel()) >= MIN_CLOUD_PX
     keep[0] = False
-    mask = keep[labels]
-    mask = ndimage.binary_fill_holes(mask)
+    mask = ndimage.binary_fill_holes(keep[labels])
     mask = ndimage.binary_dilation(mask, structure=_disk(BUFFER_PX)) & valid
-    n_objects = int(ndimage.label(mask)[1])
 
     stats = CloudStats(
-        water_mode=mode,
-        water_sigma=sigma,
-        brightness_threshold=float(bright_thr),
-        cloud_line_slope=float(slope),
-        cloud_line_intercept=float(intercept),
-        excess_threshold=excess_thr,
+        water_fraction=float(water[valid].mean()),
+        noise_sigma=sigma,
+        brightness_threshold=BRIGHTNESS_SIGMA * sigma,
+        cloud_ratio_mode=cloud_mode,
+        land_ratio_mode=land_mode,
+        ratio_threshold=ratio_thr,
         cloud_fraction=float(mask[valid].mean()),
-        n_objects=n_objects,
+        n_objects=int(ndimage.label(mask)[1]),
     )
     return mask.astype(np.uint8), stats
 

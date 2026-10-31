@@ -127,12 +127,13 @@ def registration_figures(input_dir: Path, sel: dict, reg_stats: dict, out: Path)
     cube = apply_radiometric_correction(dn_all, three, valid)
     destripe_columns(cube, dn_all == SATURATION_DN)
 
-    before, _ = rgb_composite(cube, valid, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}})
+    single = {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}}
+    before = rgb_composite(cube, single, valid.all(axis=0))
     fields = {}
     reg_cube, reg_valid = cube.copy(), valid.copy()
     for i, c in ((0, "R"), (2, "B")):
         reg_cube[i], reg_valid[i], fields[c], _ = register_band(cube[1], cube[i], valid[i])
-    after, _ = rgb_composite(reg_cube, reg_valid, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}})
+    after = rgb_composite(reg_cube, single, reg_valid.all(axis=0))
 
     fig, axes = plt.subplots(2, len(CROPS), figsize=(7 * len(CROPS), 14))
     for j, (title, r, c) in enumerate(CROPS):

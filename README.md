@@ -34,8 +34,8 @@ reproduces all six outputs byte-for-byte. On the challenge data a run takes ~2.5
 |---|---|
 | `rgb_image.tif` | uint8 (H, W, 3) display composite of the registered R, G, B bands; 0 = no-data in any channel (see §5) |
 | `band_selection.json` | Per-band noise, contrast and SNR, the colour windows, and the chosen bands |
-| `cloud_mask.tif` | uint8 (H, W) on the same grid as `rgb_image.tif`: 1 = cloud, 0 = clear **or no-data** (no-data = 0 in `rgb_image.tif`) |
-| `cloud_stats.json` | Bands used, the thresholds found on the data, cloud fraction and object count |
+| `cloud_mask.tif` | uint8 (H, W) on the same grid as `rgb_image.tif`: 1 = cloud, 0 = not cloud; also 0 outside the shared footprint, where `rgb_image.tif` is 0 (§3) |
+| `cloud_stats.json` | Bands used, the water reference, noise and thresholds found on the data, cloud and land ratio modes, cloud fraction, object count, no-data pixels |
 | `registration_stats.json` | Per band: coarse shift, field range, tiles used per pass, spline smoothing, residual misregistration after warping, blocked cross-validation error of the field; and `rgb`: misregistration measured between each pair of RGB bands (see §4) |
 | `band_summary.json` | Per-band DN range, valid/saturated fractions, corrected mean/std, offset check, removed stripe amplitude |
 
@@ -138,23 +138,27 @@ window looks the same as scene content that is constant along the track. The
 same ambiguity applies to the cross-track ramp (see Instrument artifacts).
 
 Effect downstream: the RGB band choice and the SNR table below are unchanged.
-Registration improves slightly (R–B p95 0.20 → 0.18 px). The cloud mask grows
-from 4.2 % to 5.3 %: cleaner water lowers the noise estimate (1.19 → 1.08) and
-with it the brightness threshold, adding mostly faint cloud margins but also
-a few small objects on land.
+Registration improves slightly (R–B p95 0.20 → 0.18 px). The cloud mask compares
+each pixel with the water in its own column (§6), so a column offset cancels
+there with or without destriping.
 
 ### 3. Invalid pixels
 - DN = 0 is treated as no-data (configurable with `--nodata`) and becomes NaN
-  after correction.
+  after correction. The challenge data contains none (the lowest DN is 103), so
+  all no-data in the outputs comes from registration.
 - DN = 255 is flagged as saturated (≤ 0.03 % of pixels, cloud tops). It stays in
   the image and is excluded from SNR statistics.
 - Registration resamples each band; output pixels whose source lies outside the
   frame, or within the cubic-spline support of a no-data pixel, become no-data.
   With the green band (27) as reference this removes up to ~75 rows at the top
-  for bands 45–80 and up to ~45 rows at the bottom for bands 1–8. The RGB image
-  is valid in 97.4 % of the frame.
-- In the outputs, no-data is 0 in all three channels of `rgb_image.tif`, and 0
-  (not cloud) in `cloud_mask.tif`; the joint no-data area is the same in both.
+  for bands 45–80 and up to ~45 rows at the bottom for bands 1–8.
+- Both outputs share one footprint: the pixels valid in every band either output
+  uses (the RGB bands and the 729 nm band of the cloud mask). The 729 nm band is
+  shifted most, so it sets the left and top borders. The footprint is 94.9 % of
+  the frame. Outside it, `rgb_image.tif` is 0 in all three channels and
+  `cloud_mask.tif` is 0, so a 0 in the mask is "not cloud" only where the RGB
+  image is non-zero. Without a shared footprint the mask would read "clear" in a
+  strip (cols 6–27, rows 8–40) where it cannot be computed.
 
 ### 4. Co-registration (`registration.py`)
 
@@ -335,39 +339,45 @@ support.
 ### 6. Cloud mask (`cloud.py`)
 
 There is no NIR or SWIR, so the usual tests (bright NIR, SWIR cirrus band) are
-unavailable. Two visible-range facts remain:
+unavailable. The mask uses the registered green (27, 556 nm) and longest
+(80, 729 nm) bands, after a 3×3 mean (single-pixel SNR is ~6), and three facts:
 
-- clouds are much brighter than the water they lie over;
-- clouds are spectrally flat in reflectance, so their radiance follows the solar
-  spectrum, while every land surface here (vegetation's red edge, soil, roofs,
-  sand) gets relatively brighter towards the longest band, 729 nm.
+- water is dark at 729 nm, and the clouds lie over water;
+- a cloud adds light to the water below it;
+- clouds are spectrally flat in reflectance, so the light they add follows the
+  solar spectrum, while every land surface here (vegetation's red edge, soil,
+  roofs, sand) adds relatively more light at 729 nm.
 
-Radiances add, so every mixture of water and cloud (thin cloud, cloud edges)
-lies on one straight line in the plane L(729) vs L(556), the *cloud line*; land
-lies above it. On the registered green (27) and 729 nm (80) bands, after a 3×3
-mean (single-pixel SNR is ~6):
+1. **Water reference.** Water pixels are those dark at 729 nm (within 3σ of the
+   dark cluster's mode; 56 % of the frame). The water level is the median over
+   water pixels in each column, per 256-row block, interpolated over land
+   columns and between blocks. Comparing within a column matters: across the
+   swath the water level varies by ~3 units (the cross-track ramp and column
+   banding, see Instrument artifacts), almost ten times the noise.
+2. **Brightness.** The light a pixel adds over its column's water,
+   `dg = g − g_water`, must exceed 5σ, where σ = 0.35 is the noise of `dg` over
+   water, measured on its dark side (free of cloud and land). Noise alone
+   passes with probability ~3·10⁻⁷. Threshold: 1.77 units, ~3 DN.
+3. **Colour of the added light.** `r = dn / dg`, the 729 nm light added per unit
+   of green light added. Radiances add, so a pixel that is a fraction *f* cloud
+   adds *f* × (cloud − water) in both bands: `r` is the same for thin and thick
+   cloud. Land adds relatively more 729 nm light, so its `r` is higher. Among
+   strongly bright pixels (`dg` > 20σ, where `r` is precise) the histogram of
+   `r` is bimodal, cloud 0.69 and land 1.06; the threshold is the minimum of the
+   smoothed histogram between them (0.86), so it comes from the data. A pixel is
+   cloud if it is bright and `r` < 0.86.
+4. **Shape.** An opening with a 7 px disk removes features up to ~4 px wide
+   (roof edges, piers); objects under 100 px are dropped; holes are filled; a
+   2 px buffer covers mixed edge pixels and the small cloud parallax (clouds sit
+   above the ground the bands were registered to).
 
-1. **Brightness**: green radiance more than 5σ above the water mode, where σ is
-   the water cluster's noise measured on its dark side (free of cloud and
-   land). Water noise alone passes with probability ~3·10⁻⁷. Here: mode 69.7,
-   σ 1.08, threshold 75.1.
-2. **Spectral shape**: the *red-edge excess* is the height above the cloud line,
-   fitted to the lower envelope of the bright pixels (slope 0.957). Among bright
-   pixels its histogram is bimodal (cloud ≈ +1, land ≈ +4). The threshold is the
-   minimum of the smoothed histogram between the modes (2.18), so it comes from
-   the data. Otsu's method was tried first and put the split at 3.0, inside the
-   land mode, because it is biased towards the larger class. 90 % of cloud
-   pixels lie below 1.6; 90 % of airfield and beach pixels lie above 2.4.
-3. **Shape**: an opening with a 7 px disk removes features up to ~4 px wide
-   (beach strip, roof edges, piers); objects under 100 px are dropped; holes are
-   filled; a 2 px buffer covers mixed edge pixels and the small cloud parallax
-   (clouds sit above the ground the bands were registered to).
-
-Result: 5.3 % of the valid frame, 86 objects (`figures/cloud_mask_overlay.png`
-from `tools/make_figures.py`). The tests build a synthetic scene from the same
-physics (water, red-edge land, soft clouds mixed linearly with water, and
-cloud-coloured lines and blobs) and check that definite cloud is all found, and
-that land, thin or tiny decoys, and water beyond the buffer are not.
+Result: 9.3 % of the footprint, 137 objects, written with the thresholds to
+`cloud_stats.json` (`figures/cloud_mask_overlay.png` from
+`tools/make_figures.py`). The tests build a synthetic scene from the same
+physics (banded water with a cross-track ramp, red-edge land, soft clouds
+mixed linearly with water, and cloud-coloured lines and blobs) and check that
+cloud down to 20 % cover is found, and that land, thin or tiny decoys and the
+banded water are not.
 
 ### 7. Ship detection (optional)
 Not implemented. A natural extension of the steps above: within the cloud-free,
@@ -489,8 +499,8 @@ frames. *Effect*: corrected values include about gain × 112, so they are not
 absolute radiance, and anything that divides by a level or compares levels
 between bands of different gain is biased. The pipeline's steps are
 offset-invariant (destriping, SNR, registration with tile means removed, RGB
-stretch, cloud mask with a water-relative brightness test and a cloud line with
-an intercept); the exception is the continuity residual of the offset check
+stretch, cloud mask on light added over the water); the exception is the
+continuity residual of the offset check
 (§2), whose repair decision is unaffected. *Not corrected*: the pedestal is not
 known per band better than ~±4 DN, which is comparable to the water signal.
 
@@ -509,8 +519,10 @@ known per band better than ~±4 DN, which is comparable to the water signal.
   "red", "green" and "blue" for a display composite.
 - Clouds are spectrally flat in reflectance over 556–729 nm, and the surfaces
   confused with them (land, sand, roofs) are relatively brighter at 729 nm.
-  Thresholds are found on each scene, but the method assumes a scene with a
-  dominant dark water cluster to measure the noise and set the brightness test.
+  Thresholds are found on each scene, but the method assumes water in most
+  columns (columns without water borrow the level of their neighbours) and a
+  scene with both cloud and land, so that the ratio histogram has two modes
+  (with one mode it falls back to Otsu's threshold and logs a warning).
 
 ## Limitations
 - Repaired offsets are a consistent replacement (the median of the normal
@@ -539,14 +551,12 @@ known per band better than ~±4 DN, which is comparable to the water signal.
 - By default each colour uses one band. `--average-neighbours` averages in-window
   neighbours, which lowers the noise but not the column banding, at a small
   cost in spectral purity.
-- Cloud mask: bright, spectrally grey man-made surfaces of cloud-like size
-  (a few white roofs, the Shelter Island marina) are false alarms; the faintest
-  haze at cloud margins is missed (below the 5σ brightness test). Thin cloud over
-  land is harder than over water, because the land below raises the red-edge
-  excess; in this scene the clouds are over the ocean. Each band's response
-  drifts across the swath (−2 to +3.7 % per 1000 columns on open water, measured
-  per band; 729 nm drifts more than 556 nm), which slightly lowers the excess
-  towards the left of the frame.
+- Cloud mask: surf along the Silver Strand and a few bright roofs are false
+  alarms (whitewater is as bright and as spectrally flat as cloud; about ten
+  small objects); the faintest haze at cloud margins is missed (below the 5σ
+  brightness test). Cloud over land is not tested: the reference is water, so
+  thin cloud over land would add land-coloured light and be rejected. In this
+  scene the clouds are over the ocean.
 - No cloud-shadow mask.
 - No ship detection (§7).
 - Only radiance-like corrected values are produced: no conversion to

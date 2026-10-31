@@ -189,25 +189,24 @@ def combined_noise(snr: list[BandSNR], weights: dict[int, float]) -> float:
 
 
 def rgb_composite(
-    cube: np.ndarray, valid: np.ndarray, weights: dict[str, dict[int, float]]
-) -> tuple[np.ndarray, np.ndarray]:
+    cube: np.ndarray, weights: dict[str, dict[int, float]], footprint: np.ndarray
+) -> np.ndarray:
     """8-bit display composite of the (registered) channel bands.
 
     Args:
         cube: ``(n_bands, H, W)`` float32 registered corrected values.
-        valid: ``(n_bands, H, W)`` bool validity after registration.
         weights: Per colour, cube index -> weight, from :func:`channel_weights`.
+        footprint: ``(H, W)`` bool, pixels to show; it must be valid in every
+            band in ``weights``.
 
     Returns:
-        ``(H, W, 3)`` uint8 RGB, 0 in all channels where any contributing band
-        is invalid; and the ``(H, W)`` bool joint validity.
+        ``(H, W, 3)`` uint8 RGB in 1..255 inside the footprint, 0 in all
+        channels outside it.
     """
-    used = sorted({i for w in weights.values() for i in w})
-    joint = valid[used].all(axis=0)
-    rgb = np.zeros((*joint.shape, 3), np.uint8)
+    rgb = np.zeros((*footprint.shape, 3), np.uint8)
     for c, colour in enumerate(("R", "G", "B")):
         channel = sum(w * cube[i] for i, w in weights[colour].items())
-        lo, hi = np.percentile(channel[joint], STRETCH_PERCENTILES)
+        lo, hi = np.percentile(channel[footprint], STRETCH_PERCENTILES)
         scaled = (channel - lo) / (hi - lo) * 254 + 1
-        rgb[..., c] = np.where(joint, np.clip(np.rint(scaled), 1, 255), 0).astype(np.uint8)
-    return rgb, joint
+        rgb[..., c] = np.where(footprint, np.clip(np.rint(scaled), 1, 255), 0).astype(np.uint8)
+    return rgb

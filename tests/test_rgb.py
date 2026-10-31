@@ -63,13 +63,13 @@ def test_select_rgb_reports_an_empty_window():
 
 
 def test_rgb_composite_reserves_zero_for_nodata():
-    """Pixels invalid in any channel are 0 in all; valid pixels lie in 1..255."""
+    """Pixels outside the footprint are 0 in all channels; pixels inside lie in 1..255."""
     cube = np.stack([_scene(seed=s) for s in range(3)]).astype(np.float32)
-    valid = np.ones(cube.shape, bool)
-    valid[1, :10, :] = False
-    rgb, joint = rgb_composite(cube, valid, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}})
+    footprint = np.ones(cube.shape[1:], bool)
+    footprint[:10, :] = False
+    rgb = rgb_composite(cube, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}}, footprint)
     assert rgb.shape == (512, 512, 3) and rgb.dtype == np.uint8
-    assert (rgb[:10] == 0).all() and not joint[:10].any()
+    assert (rgb[:10] == 0).all()
     assert rgb[10:].min() >= 1
 
 
@@ -88,9 +88,8 @@ def test_channel_weights_are_inverse_variance_inside_the_window():
 def test_weighted_composite_matches_single_band_when_unweighted():
     """A one-band channel is the band itself; averaging two equal bands changes nothing."""
     cube = np.stack([_scene(seed=s) for s in range(3)]).astype(np.float32)
-    valid = np.ones(cube.shape, bool)
-    single, _ = rgb_composite(cube, valid, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}})
+    footprint = np.ones(cube.shape[1:], bool)
+    single = rgb_composite(cube, {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}}, footprint)
     pair = np.concatenate([cube, cube[1:2]])  # band 3 duplicates band 1
-    valid4 = np.ones(pair.shape, bool)
-    avg, _ = rgb_composite(pair, valid4, {"R": {0: 1.0}, "G": {1: 0.5, 3: 0.5}, "B": {2: 1.0}})
+    avg = rgb_composite(pair, {"R": {0: 1.0}, "G": {1: 0.5, 3: 0.5}, "B": {2: 1.0}}, footprint)
     assert np.array_equal(single, avg)

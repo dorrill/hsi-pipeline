@@ -301,35 +301,39 @@ def main(argv: list[str] | None = None) -> int:
             pair, r["median_px"], r["p95_px"], r["n_tiles"],
         )  # fmt: skip
 
-    # 5. Cloud mask on the registered grid, from the green band and the longest
-    #    band (the closest the capture gets to NIR).
+    # 5. One no-data footprint for both outputs: pixels valid in every band the
+    #    RGB or the cloud mask uses. The cloud mask also needs the longest band
+    #    (the closest the capture gets to NIR), which registration shifts by
+    #    ~25 px, so without this the mask would read "clear" where it is unknown.
     red_edge = int(np.argmax([b.wavelength_nm for b in bands]))
     green = chosen["G"]
-    mask_valid = valid[[chosen["R"], green, chosen["B"], red_edge]].all(axis=0)
-    mask, cloud = cloud_mask(corrected[green], corrected[red_edge], mask_valid)
+    used = sorted({i for w in weights.values() for i in w} | {green, red_edge})
+    footprint = valid[used].all(axis=0)
+
+    mask, cloud = cloud_mask(corrected[green], corrected[red_edge], footprint)
     write_tiff(args.output_dir / "cloud_mask.tif", mask)
     cloud_report = {
         "bands": {"green": bands[green].band_id, "red_edge": bands[red_edge].band_id},
         **{k: round(v, 4) if isinstance(v, float) else v for k, v in vars(cloud).items()},
-        "no_data_pixels": int((~mask_valid).sum()),
+        "no_data_pixels": int((~footprint).sum()),
     }
     (args.output_dir / "cloud_stats.json").write_text(json.dumps(cloud_report, indent=2))
     log.info(
-        "Wrote %s: %.1f %% cloud, %d objects (excess threshold %.2f)",
+        "Wrote %s: %.1f %% cloud, %d objects (ratio threshold %.2f)",
         args.output_dir / "cloud_mask.tif",
         100 * cloud.cloud_fraction,
         cloud.n_objects,
-        cloud.excess_threshold,
+        cloud.ratio_threshold,
     )
 
     # RGB composite (per-channel percentile stretch; see README for why a white
     # balance on the cloud mask was tried and not kept)
-    rgb, rgb_valid = rgb_composite(corrected, valid, weights)
+    rgb = rgb_composite(corrected, weights, footprint)
     write_tiff(args.output_dir / "rgb_image.tif", rgb, photometric="rgb")
     log.info(
-        "Wrote %s (%.1f %% of pixels valid in all three channels)",
+        "Wrote %s (%.1f %% of pixels valid)",
         args.output_dir / "rgb_image.tif",
-        100 * rgb_valid.mean(),
+        100 * footprint.mean(),
     )
 
     # 6. Optional ship detection: not implemented (see README §7)
