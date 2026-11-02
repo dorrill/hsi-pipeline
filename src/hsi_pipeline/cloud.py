@@ -180,6 +180,23 @@ def water_mode_and_sigma(values: np.ndarray) -> tuple[float, float]:
     return float(mode), float(np.sqrt(np.mean((below - mode) ** 2)))
 
 
+def water_mask(red_edge: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Water pixels: the dark cluster at the longest band.
+
+    Args:
+        red_edge: ``(H, W)`` float radiance of the longest band (729 nm here).
+        valid: ``(H, W)`` bool valid pixels.
+
+    Returns:
+        ``(H, W)`` bool, True where the smoothed radiance is less than
+        ``WATER_SIGMA`` standard deviations above the dark cluster's mode.
+    """
+    n = _smooth(red_edge, valid)
+    inner = ndimage.binary_erosion(valid, iterations=SMOOTH_PX)
+    mode, sigma = water_mode_and_sigma(n[inner])
+    return inner & (n < mode + WATER_SIGMA * sigma)
+
+
 def _fill_gaps(profile: np.ndarray) -> np.ndarray:
     """Linear interpolation over the NaNs of a 1-D profile (unchanged if all NaN)."""
     ok = np.isfinite(profile)
@@ -250,8 +267,7 @@ def cloud_mask(
     inner = ndimage.binary_erosion(valid, iterations=SMOOTH_PX)
 
     # 1. Water reference per column, and the light each pixel adds over it.
-    n_mode, n_sigma = water_mode_and_sigma(n[inner])
-    water = inner & (n < n_mode + WATER_SIGMA * n_sigma)
+    water = water_mask(red_edge, valid)
     dg = g - water_reference(g, water)
     dn = n - water_reference(n, water)
 

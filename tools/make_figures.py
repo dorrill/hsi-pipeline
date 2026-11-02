@@ -218,6 +218,44 @@ def offset_figure(summary: list[dict], out: Path) -> None:
     plt.close(fig)
 
 
+def offset_by_band_figures(summary: list[dict], out: Path) -> None:
+    """Scene-mean corrected value vs band number, before and after the offset repair.
+
+    Writes two images with the same axes, so they can be compared side by side
+    or flipped between: ``offsets_by_band_before.png`` (metadata offsets) and
+    ``offsets_by_band_after.png`` (repaired offsets). Repaired bands are marked.
+    """
+    rows = sorted(summary, key=lambda r: int(r["band_id"]))
+    number = np.array([int(r["band_id"]) for r in rows])
+    after = np.array([r["corrected_mean"] for r in rows])
+    before = after + np.array([r["offset_metadata"] - r["offset"] for r in rows])
+    fixed = np.array([r["offset_repaired"] for r in rows])
+    lo, hi = min(before.min(), after.min()), max(before.max(), after.max())
+    margin = 0.05 * (hi - lo)
+    for name, values, label in (
+        ("before", before, "metadata offsets"),
+        ("after", after, "repaired offsets"),
+    ):
+        fig, ax = plt.subplots(figsize=(11, 4.8))
+        ax.plot(number, values, "o-", color="tab:blue", ms=4, lw=1, label="all bands")
+        ax.plot(
+            number[fixed], values[fixed], "o", ms=9, mfc="none", mec="tab:red", mew=2,
+            label="offset replaced by the check",
+        )  # fmt: skip
+        for k, (n, v) in enumerate(zip(number[fixed], values[fixed], strict=True)):
+            dy = 8 if k % 2 == 0 else -14  # alternate above/below: neighbours overlap
+            ax.annotate(str(n), (n, v), textcoords="offset points", xytext=(-4, dy), fontsize=8)
+        ax.set_xlabel("band number (metadata key; not monotonic in wavelength)")
+        ax.set_ylabel("scene-mean gain·DN + offset")
+        ax.set_ylim(lo - margin, hi + margin)
+        ax.set_title(f"Corrected scene mean by band, {label}")
+        ax.legend()
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(out / f"offsets_by_band_{name}.png", dpi=110)
+        plt.close(fig)
+
+
 def cloud_figure(rgb: np.ndarray, mask: np.ndarray, stats: dict, out: Path) -> None:
     """Cloud mask outline on the RGB composite, full frame and crops."""
     crops = [
@@ -244,6 +282,59 @@ def cloud_figure(rgb: np.ndarray, mask: np.ndarray, stats: dict, out: Path) -> N
     plt.close(fig)
 
 
+def ship_figure(rgb: np.ndarray, mask: np.ndarray, report: dict, out: Path) -> None:
+    """Ship boxes on the RGB composite (solid: confidence >= 0.5), and a crop of each."""
+    ships = report["ships"]
+    fig = plt.figure(figsize=(24, 10.5), layout="constrained")
+    full, grid = fig.subfigures(1, 2, width_ratios=[1, 1.4])
+    ax = full.subplots()
+    ax.imshow(rgb[::2, ::2])
+    ax.contour(mask[::2, ::2], [0.5], colors="yellow", linewidths=0.5)
+    pad = 12  # px around each box, so small vessels stay visible at this scale
+    for s in ships:
+        style = "-" if s["confidence"] >= 0.5 else ":"
+        ax.add_patch(
+            plt.Rectangle(
+                ((s["col_min"] - pad) / 2, (s["row_min"] - pad) / 2),
+                (s["col_max"] - s["col_min"] + 2 * pad) / 2,
+                (s["row_max"] - s["row_min"] + 2 * pad) / 2,
+                fill=False, ec="red", lw=1.5, ls=style,
+            )
+        )  # fmt: skip
+    n_conf = sum(s["confidence"] >= 0.5 for s in ships)
+    ax.set_title(
+        f"{len(ships)} detections, {n_conf} with confidence >= 0.5 (solid); "
+        f"searched {100 * report['search_fraction']:.0f} % of the frame; cloud in yellow"
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    cols = 7
+    axes = grid.subplots(-(-len(ships) // cols), cols, squeeze=False).ravel()
+    half = 32
+    for a, s in zip(axes, ships, strict=False):
+        cy, cx = (s["row_min"] + s["row_max"]) // 2, (s["col_min"] + s["col_max"]) // 2
+        y0 = int(np.clip(cy - half, 0, rgb.shape[0] - 2 * half))
+        x0 = int(np.clip(cx - half, 0, rgb.shape[1] - 2 * half))
+        crop = rgb[y0 : y0 + 2 * half, x0 : x0 + 2 * half].astype(np.float32)
+        lo, hi = np.percentile(crop, [1, 99.5])  # water is dark in the global stretch
+        a.imshow(np.clip((crop - lo) / max(hi - lo, 1), 0, 1), interpolation="nearest")
+        a.add_patch(
+            plt.Rectangle(
+                (s["col_min"] - x0 - 1.5, s["row_min"] - y0 - 1.5),
+                s["col_max"] - s["col_min"] + 2, s["row_max"] - s["row_min"] + 2,
+                fill=False, ec="red", lw=0.8, ls="-" if s["confidence"] >= 0.5 else ":",
+            )
+        )  # fmt: skip
+        a.set_title(f"#{s['id']}  {s['confidence']:.2f}  ({cy}, {cx})", fontsize=9)
+    for a in axes:
+        a.set_xticks([])
+        a.set_yticks([])
+    for a in axes[len(ships) :]:
+        a.set_visible(False)
+    fig.savefig(out / "ships_overlay.png", dpi=80)
+    plt.close(fig)
+
+
 def main() -> None:
     """Write the summary figures to ``<output-dir>/figures``."""
     ap = argparse.ArgumentParser(description=__doc__)
@@ -259,12 +350,15 @@ def main() -> None:
     rgb = tifffile.imread(args.output_dir / "rgb_image.tif")
     mask = tifffile.imread(args.output_dir / "cloud_mask.tif")
     cloud_stats = json.loads((args.output_dir / "cloud_stats.json").read_text())
+    ships = json.loads((args.output_dir / "ships.json").read_text())
 
     snr_figure(sel, summary, out)
     rgb_figures(rgb, sel, out)
     cloud_figure(rgb, mask, cloud_stats, out)
+    ship_figure(rgb, mask, ships, out)
     shift_vs_band_figure(reg, out)
     offset_figure(summary, out)
+    offset_by_band_figures(summary, out)
     registration_figures(args.input_dir, sel, reg, out)
     print(f"Wrote figures to {out}")
 

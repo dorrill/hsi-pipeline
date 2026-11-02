@@ -34,6 +34,7 @@ from .rgb import (
     rgb_composite,
     select_rgb,
 )
+from .ships import CONFIDENT, detect_ships, draw_boxes
 
 log = logging.getLogger("hsi_pipeline")
 
@@ -350,7 +351,27 @@ def main(argv: list[str] | None = None) -> int:
         100 * footprint.mean(),
     )
 
-    # Optional ship detection: not implemented
+    # 8. Ships in the cloud-free open water, on the same grid as the RGB image;
+    #    written after the RGB and cloud mask so that it cannot prevent them
+    ships, search = detect_ships(corrected[red_edge], mask.astype(bool), footprint)
+    ship_report = {
+        "band": bands[red_edge].band_id,
+        "bbox_convention": "pixel rows/columns of rgb_image.tif, inclusive",
+        "search_fraction": round(search.search_fraction, 4),
+        "noise": round(search.noise, 4),
+        "ships": [{"id": i, **_rounded(s)} for i, s in enumerate(ships, 1)],
+    }
+    (args.output_dir / "ships.json").write_text(json.dumps(ship_report, indent=2))
+    write_tiff(args.output_dir / "ships_overlay.tif", draw_boxes(rgb, ships), photometric="rgb")
+    log.info(
+        "Wrote %s and ships_overlay.tif: %d detections, %d with confidence >= %.1f "
+        "(searched %.1f %% of the frame)",
+        args.output_dir / "ships.json",
+        len(ships),
+        sum(s.confidence >= CONFIDENT for s in ships),
+        CONFIDENT,
+        100 * search.search_fraction,
+    )
     return 0
 
 

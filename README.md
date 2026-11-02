@@ -1,10 +1,10 @@
 # Hyperspectral Image Processing Pipeline
 
 Turns a 48-band, 2048 × 2048, 8-bit hyperspectral capture into a radiometrically
-corrected, co-registered RGB image and a binary cloud mask, and reports how well
-the RGB bands are co-registered.
+corrected, co-registered RGB image and a binary cloud mask, reports how well
+the RGB bands are co-registered, and detects ships in the cloud-free water.
 
-## Results on the challenge capture
+## Results from the Hyperspectral Image Processing Challenge
 
 | | |
 |---|---|
@@ -12,6 +12,7 @@ the RGB bands are co-registered.
 | Misregistration before | B vs G 10–37 px, R vs G 8–23 px, varying over the frame |
 | Misregistration after (independent check) | ~0.05 px median on land (p95 0.17–0.36 px), ~0.12 px on cloud |
 | Cloud | 9.3 % of the valid area, 137 objects |
+| Ships | 28 detections in cloud-free open water, 16 with confidence ≥ 0.5 |
 | Valid area | 94.9 % of the frame (no-data only at the borders, from registration) |
 
 ## Quick start
@@ -27,7 +28,7 @@ pytest                            # needs the dev extra
 `inputs/` holds the `b{n}.raw` files and `band_metadata.json`. A run takes
 ~2.5 min and ~1.9 GB peak with the default 4 registration workers (`--workers`).
 It is deterministic: there is no random state in the pipeline, and a fresh clone
-installed with `requirements.txt` reproduces all six outputs byte for byte.
+installed with `requirements.txt` reproduces all eight outputs byte for byte.
 
 Without the real data, `python tools/make_synthetic.py --out synthetic_inputs`
 writes a synthetic capture with known per-band shifts. After a run,
@@ -43,6 +44,8 @@ summary figures to `outputs/figures/` (needs the `viz` extra).
 | `registration_stats.json` | Per band: shifts, field, residual and cross-validation error. `rgb`: the accuracy between the RGB bands (below) |
 | `band_selection.json` | Per-band noise, contrast and SNR; the colour windows; the chosen bands |
 | `cloud_stats.json` | Water reference, noise, thresholds found on the data, cloud fraction, object count |
+| `ships.json` | Per detection: bounding box (rows/columns of `rgb_image.tif`, inclusive), area, peak contrast, confidence |
+| `ships_overlay.tif` | `rgb_image.tif` with a box around each detection: red for confidence ≥ 0.5, orange below |
 | `band_summary.json` | Per-band DN range, valid/saturated fractions, offset check, removed stripe amplitude |
 
 ## Method
@@ -186,7 +189,35 @@ cross-track ramp, land, soft clouds mixed linearly with water, cloud-coloured
 lines and blobs) and check that cloud down to 20 % cover is found and that land,
 small decoys and the banded water are not.
 
-Ship detection (optional) is not implemented.
+### 7. Ships (`ships.py`)
+Water absorbs strongly beyond 700 nm, so at 729 nm it is the darkest surface in
+the scene and any vessel, dark hull or white deck, is brighter than the water
+around it. The detector looks for compact bright objects on the water at 729 nm.
+
+1. **Search area.** The water from the cloud mask's water test, with enclosed
+   objects (the vessels) filled in, minus a 5 px shore margin and everything
+   within 64 px of the cloud mask: 32 % of the frame. The cloud buffer is wide
+   because the cloud fields hold small, faint puffs below the cloud mask's
+   100 px minimum, which look like small bright objects; here they all lie
+   within ~55 px of masked cloud, and the nearest vessel is ~70 px away.
+2. **Contrast.** The 3×3 mean of the 729 nm radiance minus its local median
+   (31 px along rows, then along columns), in units of its own noise over the
+   search area.
+3. **Objects.** Hysteresis thresholding: a pixel above 8σ seeds a detection,
+   and its connected region above 4σ gives the bounding box.
+4. **Confidence.** A logistic in the peak contrast, 0.5 at 12σ and 0.88 at 16σ.
+   12σ is about the contrast of the brightest haze patches outside the cloud
+   buffer (up to 11.6σ); most vessels reach 13–43σ. It ranks the detections; it
+   is not a calibrated probability.
+
+`ships_overlay.tif` draws the boxes on the RGB image with a 3 px gap, so they
+frame the vessels without covering them. On the capture, all 16 detections with
+confidence ≥ 0.5 look like vessels in the image. The 12 below are a mix of small
+boats or buoys and haze patches (`outputs/figures/ships_overlay.png` shows a
+crop of each). The tests check, on
+a synthetic banded-water scene, that a vessel in open water is found with a
+tight box while equally bright objects near a cloud, on land and moored against
+the shore are not, and that empty water gives no detections.
 
 ## Assumptions
 - The gain/offset convention is linear, and DN = 0 is fill.
@@ -213,6 +244,11 @@ Ship detection (optional) is not implemented.
   (about ten small objects; whitewater is as bright and as flat-spectrum as
   cloud); the faintest haze at cloud edges is missed. Cloud over land is not
   handled: the reference is water. No cloud-shadow mask.
+- **Ships**: vessels moored against piers or the shore are not searched (at this
+  resolution they cannot be told from the piers), and the cloud mask with its
+  64 px buffer leaves 56 % of the open water to search. Small boats and haze
+  patches have similar contrast (8–12σ), so the low-confidence detections mix
+  the two. There is no ground truth, so detection rates are not measured.
 - **Registration accuracy** is checked against ground truth only on synthetic
   data; on the real data the independent check measures land and cloud, not open
   water, where the field is interpolated.
@@ -231,7 +267,8 @@ ramp, offsets, pedestal, detector geometry) are analysed in
 src/hsi_pipeline/   io.py (loading), radiometry.py (correction, validity, destriping),
                     calibration.py (offset check), registration.py (co-registration
                     and its evaluation), rgb.py (SNR, band choice, composite),
-                    cloud.py (cloud mask), cli.py (entry point)
+                    cloud.py (cloud mask), ships.py (ship detection),
+                    cli.py (entry point)
 tools/              make_figures.py, destripe_diagnostics.py, ramp_diagnostics.py
                     (figures and diagnostics, viz extra); make_synthetic.py
 tests/              unit tests, including synthetic ground truth
