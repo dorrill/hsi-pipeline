@@ -10,9 +10,9 @@ the RGB bands are co-registered, and detects ships in the cloud-free water.
 |---|---|
 | RGB bands (highest SNR per colour window) | R = band 43 (625.5 nm), G = 27 (556 nm), B = 7 (486 nm) |
 | Misregistration before | B vs G 10–37 px, R vs G 8–23 px, varying over the frame |
-| Misregistration after (independent check) | ~0.05 px median on land (p95 0.17–0.36 px), ~0.12 px on cloud |
-| Cloud | 9.3 % of the valid area, 137 objects |
-| Ships | 28 detections in cloud-free open water, 16 with confidence ≥ 0.5 |
+| Misregistration after (independent check) | ~0.05 px median on land (p95 0.17–0.33 px), ~0.07–0.10 px on cloud |
+| Cloud | 9.8 % of the valid area, 128 objects |
+| Ships | 46 detections in cloud-free open water, 25 with confidence ≥ 0.5 (see Ships) |
 | Valid area | 94.9 % of the frame (no-data only at the borders, from registration) |
 
 ## Quick start
@@ -67,8 +67,10 @@ calibration; both can be switched off:
 - **Column destriping** (`--no-destripe`). Every band has ~2 DN single-column
   stripes, the same in all bands: a detector-column offset. Each column's offset
   is the median, down the column, of the difference between the row and its
-  15-column running median, and is subtracted. Split-half validation lowers the
-  stripe amplitude ~10× (details in [docs/instrument_notes.md](docs/instrument_notes.md)).
+  45-column running median, and is subtracted. The window is wide enough to also
+  remove most of the soft banding 20–75 columns wide (15 columns left it).
+  Split-half validation lowers the stripe amplitude 8–9× (details in
+  [docs/instrument_notes.md](docs/instrument_notes.md)).
 - **Offset repair** (`--keep-metadata-offsets`). Bands 42–44 and 75–76 have
   offsets of +41 to +68 while all others lie in −7…+3, which puts a 2.5× step into
   the spectrum although their raw DNs are continuous with their neighbours. An
@@ -117,15 +119,15 @@ floor is 0.013 px median.
 
 | Pair | Clear windows | Median / p95 (px) | Cloud windows | Median / p95 (px) |
 |---|---|---|---|---|
-| R–G | 330 | 0.051 / 0.26 | 116 | 0.13 / 0.38 |
-| B–G | 226 | 0.049 / 0.17 | 70 | 0.11 / 0.25 |
-| R–B | 330 | 0.064 / 0.36 | 116 | 0.13 / 0.35 |
+| R–G | 325 | 0.048 / 0.22 | 117 | 0.096 / 0.29 |
+| B–G | 222 | 0.044 / 0.17 | 73 | 0.069 / 0.22 |
+| R–B | 325 | 0.060 / 0.33 | 117 | 0.10 / 0.27 |
 
 Two other measures bracket this. Re-measuring with the fit's own phase
-correlation (`rgb.self_consistency_residual`) gives 0.014–0.036 px median, ~4×
+correlation (`rgb.self_consistency_residual`) gives 0.010–0.036 px median, ~4×
 too optimistic, because a flexible field absorbs the tiles' own errors. The
 fields' blocked cross-validation error (`rgb.field_cv_error_vs_reference`,
-0.16 px median, 0.73–0.77 px p95) is pessimistic, because it predicts into
+0.16 px median, 0.75–0.80 px p95) is pessimistic, because it predicts into
 held-out blocks and open-water gaps. No colour fringes are visible at full
 resolution. On synthetic data with known shifts (`tests/test_registration.py`),
 bands 40–120 nm from the reference are recovered to 0.08–0.12 px median.
@@ -146,7 +148,7 @@ The chosen band is the highest-SNR band in each conventional colour window (blue
 |---|---|---|---|---|
 | R | 43 | 625.5 | 11.8 | 63 (683.5 nm), 9.9 |
 | G | 27 | 556.0 | 6.6 | 28 (559 nm), 6.5 |
-| B | 7 | 486.0 | 6.4 | 8 (491 nm), 6.4 |
+| B | 7 | 486.0 | 6.4 | 8 (491 nm), 6.3 |
 
 Noise is ~1 DN in every band, so SNR follows how many DN the scene spans, which
 favours the low-gain bands; that puts R on band 43. For G and B the winner leads
@@ -166,19 +168,19 @@ after a 3×3 mean, and three facts: water is dark at 729 nm; a cloud adds light 
 the water below it; and that light is spectrally flat, while every land surface
 here (vegetation, soil, roofs, sand) adds relatively more 729 nm light.
 
-1. **Water reference.** Water pixels are those dark at 729 nm (56 % of the frame).
+1. **Water reference.** Water pixels are those dark at 729 nm (55 % of the frame).
    The water level is their median in each column, per 256-row block,
    interpolated over land columns. This matters: across the swath the water level
    varies by ~3 units (a smooth ramp and column banding), almost ten times the
    noise.
 2. **Brightness.** The light a pixel adds over its column's water,
-   `dg = g − g_water`, must exceed 5σ, with σ = 0.35 the noise of `dg` over water.
-   Threshold: 1.77 units (~3 DN).
+   `dg = g − g_water`, must exceed 5σ, with σ = 0.34 the noise of `dg` over water.
+   Threshold: 1.72 units (~3 DN).
 3. **Colour of the added light.** `r = dn / dg`, the 729 nm light added per unit
    of green light added. A pixel that is a fraction *f* cloud adds
    *f* × (cloud − water) in both bands, so `r` is the same for thin and thick
    cloud. Among strongly bright pixels the histogram of `r` has two modes, cloud
-   0.69 and land 1.06; the threshold is the valley between them, 0.86, found on
+   0.69 and land 1.07; the threshold is the valley between them, 0.86, found on
    the data. Cloud = bright and `r` < 0.86.
 4. **Shape.** An opening removes features up to ~4 px wide (roof edges, piers),
    objects under 100 px are dropped, holes are filled, and a 2 px buffer covers
@@ -206,15 +208,18 @@ around it. The detector looks for compact bright objects on the water at 729 nm.
 3. **Objects.** Hysteresis thresholding: a pixel above 8σ seeds a detection,
    and its connected region above 4σ gives the bounding box.
 4. **Confidence.** A logistic in the peak contrast, 0.5 at 12σ and 0.88 at 16σ.
-   12σ is about the contrast of the brightest haze patches outside the cloud
-   buffer (up to 11.6σ); most vessels reach 13–43σ. It ranks the detections; it
-   is not a calibrated probability.
+   12σ was set just above the brightest haze patches outside the cloud buffer
+   (11.6σ) with 15-column destriping. It ranks the detections; it is not a
+   calibrated probability.
 
 `ships_overlay.tif` draws the boxes on the RGB image with a 3 px gap, so they
-frame the vessels without covering them. On the capture, all 16 detections with
-confidence ≥ 0.5 look like vessels in the image. The 12 below are a mix of small
-boats or buoys and haze patches (`outputs/figures/ships_overlay.png` shows a
-crop of each). The tests check, on
+frame the vessels without covering them. The 45-column destriping removes
+banding that had inflated the 729 nm noise (0.166 → 0.126), so every contrast
+in σ is now ~1.3× higher while the thresholds are unchanged: all 28 earlier
+detections are kept in the same order, but haze patches now reach ~16σ, so some
+score ≥ 0.5, and 18 faint new detections are mostly haze. The thresholds need
+re-deriving for the new noise (`outputs/figures/ships_overlay.png` shows a crop
+of each detection). The tests check, on
 a synthetic banded-water scene, that a vessel in open water is found with a
 tight box while equally bright objects near a cloud, on land and moored against
 the shore are not, and that empty water gives no detections.
@@ -234,8 +239,9 @@ the shore are not, and that empty water gives no detections.
   warning).
 
 ## Limitations
-- **Column banding** a few to ~20 columns wide remains after destriping; it
-  cannot be separated from the scene without a flat field. Registration shifts it
+- **Column banding** remains after destriping: weaker below the 45-column
+  window, untouched above it; it cannot be separated from the scene without a
+  flat field. Registration shifts it
   by a few px between bands, which turns it into green/magenta streaks over water.
 - **Right edge**: the last ~250 columns are darker in every band, most in blue
   and green, so the edge looks magenta. The cause (dark level or path radiance)
@@ -247,7 +253,7 @@ the shore are not, and that empty water gives no detections.
 - **Ships**: vessels moored against piers or the shore are not searched (at this
   resolution they cannot be told from the piers), and the cloud mask with its
   64 px buffer leaves 56 % of the open water to search. Small boats and haze
-  patches have similar contrast (8–12σ), so the low-confidence detections mix
+  patches have similar contrast (8–16σ), so the low-confidence detections mix
   the two. There is no ground truth, so detection rates are not measured.
 - **Registration accuracy** is checked against ground truth only on synthetic
   data; on the real data the independent check measures land and cloud, not open

@@ -34,12 +34,16 @@ if TYPE_CHECKING:  # calibration imports this module, so import for typing only
 SATURATION_DN = 255
 
 #: Running-median window (columns) separating column stripes from scene content
-#: along each row. The stripes are single columns; 15 is wide enough for the
-#: running median to ignore them and narrow enough to follow the scene.
-STRIPE_WINDOW_COLUMNS = 15
+#: along each row. Only pattern narrower than the window is removed. Besides the
+#: single-column stripes the capture has soft banding 20-75 columns wide; going
+#: from 15 to 45 columns lowers its power over open water ~5-10x, while the
+#: split-half disagreement of the estimate rises only 4-12 % (scene leaking into
+#: a window that follows it less closely). 60 and 75 gain little and cost more.
+#: Odd, so the window is centred.
+STRIPE_WINDOW_COLUMNS = 45
 
 #: Estimation passes. On the real capture (split-half test, band 27) the
-#: residual stripe std is 0.16 after one pass, 0.094 after two, 0.083 after three.
+#: residual stripe std is 0.20 after one pass, 0.145 after two, 0.13 after three.
 STRIPE_PASSES = 2
 
 #: Tukey bisquare tuning constant (95 % efficiency for Gaussian residuals) and

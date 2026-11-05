@@ -13,7 +13,7 @@ calibration only.
 | Artifact | Size | Corrected? |
 |---|---|---|
 | Single-column stripes | ~2 DN, 2× the noise | Yes, empirically (destriping) |
-| Wider column banding | a few to ~20 columns | No; made coloured by registration |
+| Wider column banding | ~20 to over 75 columns | Partly (below the 45-column window); the rest made coloured by registration |
 | Right-edge fall-off | −1 to −9 DN, last ~250 columns | No |
 | Smooth level change across the swath | −9 to +3 DN over water | No (the cloud mask works around it) |
 | Wrong metadata offsets (bands 42–44, 75–76) | +41 to +68 | Yes, empirically (replaced) |
@@ -28,9 +28,10 @@ calibration only.
 constant down each column: a detector-column offset.
 
 *Corrected* (`radiometry.destripe_columns`): every row is smoothed with a
-15-column running median, which follows the scene but not single-column
-stripes; a column's offset is the median of its row residuals over valid,
-unsaturated pixels, and is subtracted from every row. A second pass refines the
+45-column running median, which follows the scene but not single-column
+stripes or banding narrower than the window; a column's offset is the median
+of its row residuals over valid, unsaturated pixels, and is subtracted from
+every row. A second pass refines the
 estimate, because the stripes pull the running median. Offsets are zero-mean,
 so band levels are unchanged.
 
@@ -40,33 +41,47 @@ re-measured there (corrected units; floor = the same measurement on white noise)
 
 | Colour | Band | Before | After | Noise floor |
 |---|---|---|---|---|
-| R | 43 | 0.58 | 0.063 | 0.012 |
-| G | 27 | 1.15 | 0.11 | 0.024 |
-| B | 7 | 0.92 | 0.10 | 0.022 |
+| R | 43 | 0.62 | 0.069 | 0.012 |
+| G | 27 | 1.22 | 0.15 | 0.024 |
+| B | 7 | 0.98 | 0.12 | 0.022 |
+
+*Window*: 45 columns. The stripe pattern is measured with the same window
+before and after, so the table includes the banding narrower than 45 columns.
+Windows of 15, 30, 45, 60 and 75 columns were compared on the full pipeline.
+Going from 15 to 45 lowers the power of 20–75-column banding over open water
+~5–10×; estimating the pattern separately on the top and bottom halves of the
+frame, the two estimates disagree 4–12 % more (a wider window follows the scene
+less closely, so more of it leaks into the estimate). 60 and 75 remove little
+more and disagree up to 30 % more.
 
 *Limits*: the pattern is estimated from the scene; a scene edge that stays in
-one column for most of the frame would bias the columns next to it.
+one column for most of the frame would bias the columns next to it. Banding
+along the track in the open ocean is assumed to be instrumental, not scene.
 
 ## Wider column banding
 
-*Observed*: after destriping, soft bands a few to ~20 columns wide remain, most
-visible over water (`outputs/diagnostics/destripe_crop.png`).
+*Observed*: soft bands from ~20 to well over 75 columns wide, most visible over water
+(`outputs/diagnostics/destripe_crop.png`). The 45-column window removes most of
+those narrower than itself: over open water (rows 1250–1500, cols 1050–1500)
+the banding std falls from 0.44 to 0.24 in G, 0.23 to 0.12 in R and 0.33 to 0.19
+in B relative to 15 columns.
 
-*Made coloured by registration*: the banding is largely shared between bands,
+*Made coloured by registration*: the banding is partly shared between bands,
 so in the unregistered bands it is nearly grey. Registration shifts R and B by
-several px across the track relative to G (over open water, R by about −4 px
+several px across the track relative to G (over open water, R by about −5 px
 and B by about +6 px), and the banding moves with them. Column profiles over
-open water (rows 1250–1500, cols 1050–1500) show it: the correlation of the R
-and B banding with G at zero lag falls from 0.69 and 0.64 before registration
-to 0.53 and 0.44 after, and peaks again at the shifts (+4 and −6 px). The
-green/magenta streaks over water in `rgb_image.tif` are this.
+the same water show it: the correlation of the R and B banding with G at zero
+lag falls from 0.41 and 0.46 before registration to 0.35 and 0.42 after (from
+0.74 and 0.73 to 0.63 and 0.54 with 15-column destriping, when more of the
+banding was shared). The green/magenta streaks over water in `rgb_image.tif` are
+this, now weaker.
 
-*Not corrected*: any per-column method has to separate the column pattern from
-the scene with a window across the track, and a pattern that varies more slowly
-than the window cannot be told from scene content that is constant along the
-track. A flat field would be needed. With one, the pattern could be removed in
-detector geometry, before registration, which would also stop it turning
-coloured.
+*Not corrected* beyond the window: any per-column method has to separate the
+column pattern from the scene with a window across the track, and a pattern
+that varies more slowly than the window cannot be told from scene content that
+is constant along the track. A flat field would be needed. With one, the pattern
+could be removed in detector geometry, before registration, which would also
+stop it turning coloured.
 
 ## Right-edge fall-off
 
