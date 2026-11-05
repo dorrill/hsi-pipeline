@@ -94,8 +94,9 @@ calibration; both can be switched off:
 
 ### 4. Co-registration (`registration.py`)
 Each band is a separate strip of detector rows, so bands see the ground at
-different times: shifts reach ~50 px, vary across the frame, and in the last ~450
-rows one detector segment is stretched along-track by up to 10 %. A translation
+different times: the overall shift grows to ~54 px for band 80 (47 px along the
+track, 27 px across), locally reaching 74 px; it varies across the frame, and in
+the last ~450 rows one detector segment is stretched along-track by up to 10 %. A translation
 or affine model leaves 0.3–1.3 px, so each band gets a smooth, non-parametric
 displacement field relative to the green band (which is therefore never
 resampled):
