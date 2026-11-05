@@ -59,19 +59,22 @@ MIN_SEA_PX = 20_000
 BACKGROUND_PX = 31
 
 #: Peak contrast that seeds a detection, in noise sigma of the 3x3 mean. Below
-#: ~8 sigma the candidates in the challenge capture are noise and haze.
-DETECT_SIGMA = 8.0
+#: ~10.5 sigma the candidates in the challenge capture are noise and haze. The
+#: sigma thresholds depend on the destriping: the 45-column window removes
+#: banding that inflated the noise (0.166 -> 0.126), so they are 1.32x the
+#: values set with the 15-column window.
+DETECT_SIGMA = 10.5
 
 #: Contrast that bounds a detection's extent (half the seed threshold).
-EXTENT_SIGMA = 4.0
+EXTENT_SIGMA = 5.25
 
-#: Confidence is 0.5 at this contrast; the brightest haze patches outside the
-#: cloud buffer reach ~11.6 sigma, most vessels 13-43 sigma.
-CONFIDENCE_MID_SIGMA = 12.0
+#: Confidence is 0.5 at this contrast; the brightest haze patch outside the
+#: cloud buffer reaches 15.7 sigma, most vessels 16-60 sigma.
+CONFIDENCE_MID_SIGMA = 16.0
 
 #: Width of the logistic (sigma): confidence 0.12 at the detection threshold,
-#: 0.88 at 16 sigma.
-CONFIDENCE_SCALE_SIGMA = 2.0
+#: 0.88 at 21.5 sigma.
+CONFIDENCE_SCALE_SIGMA = 2.75
 
 #: Confidence at or above which a detection counts as confident (red box in
 #: the overlay); below it the box is orange.

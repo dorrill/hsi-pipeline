@@ -12,7 +12,7 @@ the RGB bands are co-registered, and detects ships in the cloud-free water.
 | Misregistration before | B vs G 10–37 px, R vs G 8–23 px, varying over the frame |
 | Misregistration after (independent check) | ~0.05 px median on land (p95 0.17–0.33 px), ~0.07–0.10 px on cloud |
 | Cloud | 9.8 % of the valid area, 128 objects |
-| Ships | 46 detections in cloud-free open water, 25 with confidence ≥ 0.5 (see Ships) |
+| Ships | 29 detections in cloud-free open water, 17 with confidence ≥ 0.5 |
 | Valid area | 94.9 % of the frame (no-data only at the borders, from registration) |
 
 ## Quick start
@@ -205,21 +205,20 @@ around it. The detector looks for compact bright objects on the water at 729 nm.
 2. **Contrast.** The 3×3 mean of the 729 nm radiance minus its local median
    (31 px along rows, then along columns), in units of its own noise over the
    search area.
-3. **Objects.** Hysteresis thresholding: a pixel above 8σ seeds a detection,
-   and its connected region above 4σ gives the bounding box.
-4. **Confidence.** A logistic in the peak contrast, 0.5 at 12σ and 0.88 at 16σ.
-   12σ was set just above the brightest haze patches outside the cloud buffer
-   (11.6σ) with 15-column destriping. It ranks the detections; it is not a
-   calibrated probability.
+3. **Objects.** Hysteresis thresholding: a pixel above 10.5σ seeds a detection,
+   and its connected region above 5.25σ gives the bounding box.
+4. **Confidence.** A logistic in the peak contrast, 0.5 at 16σ and 0.88 at
+   21.5σ. 16σ is just above the brightest haze patch outside the cloud buffer
+   (15.7σ); most vessels reach 16–60σ. It ranks the detections; it is not a
+   calibrated probability. The σ thresholds depend on the destriping, which sets
+   the noise they are measured in: they are 1.32× the values first set with a
+   15-column window, which left banding that inflated the noise.
 
 `ships_overlay.tif` draws the boxes on the RGB image with a 3 px gap, so they
-frame the vessels without covering them. The 45-column destriping removes
-banding that had inflated the 729 nm noise (0.166 → 0.126), so every contrast
-in σ is now ~1.3× higher while the thresholds are unchanged: all 28 earlier
-detections are kept in the same order, but haze patches now reach ~16σ, so some
-score ≥ 0.5, and 18 faint new detections are mostly haze. The thresholds need
-re-deriving for the new noise (`outputs/figures/ships_overlay.png` shows a crop
-of each detection). The tests check, on
+frame the vessels without covering them. On the capture, the 17 detections
+with confidence ≥ 0.5 look like vessels in the image (one, in haze, is the least
+certain). The 12 below are a mix of small boats or buoys and haze patches
+(`outputs/figures/ships_overlay.png` shows a crop of each). The tests check, on
 a synthetic banded-water scene, that a vessel in open water is found with a
 tight box while equally bright objects near a cloud, on land and moored against
 the shore are not, and that empty water gives no detections.
@@ -253,7 +252,7 @@ the shore are not, and that empty water gives no detections.
 - **Ships**: vessels moored against piers or the shore are not searched (at this
   resolution they cannot be told from the piers), and the cloud mask with its
   64 px buffer leaves 56 % of the open water to search. Small boats and haze
-  patches have similar contrast (8–16σ), so the low-confidence detections mix
+  patches have similar contrast (10.5–16σ), so the low-confidence detections mix
   the two. There is no ground truth, so detection rates are not measured.
 - **Registration accuracy** is checked against ground truth only on synthetic
   data; on the real data the independent check measures land and cloud, not open
