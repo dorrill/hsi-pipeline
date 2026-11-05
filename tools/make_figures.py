@@ -22,7 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from hsi_pipeline.calibration import check_offsets  # noqa: E402
-from hsi_pipeline.io import load_cube, load_metadata  # noqa: E402
+from hsi_pipeline.io import load_cube, load_metadata, read_band  # noqa: E402
 from hsi_pipeline.radiometry import (  # noqa: E402
     SATURATION_DN,
     apply_radiometric_correction,
@@ -256,6 +256,56 @@ def offset_by_band_figures(summary: list[dict], out: Path) -> None:
         plt.close(fig)
 
 
+def dynamic_range_figure(input_dir: Path, out: Path) -> None:
+    """Raw DN range of each band vs band number: extremes, 1st-99th percentiles, median.
+
+    The extremes are set by single pixels; the percentile range is the part of
+    the 8-bit scale the scene actually fills. Writes ``dynamic_range_by_band.png``.
+    """
+    bands = load_metadata(input_dir / "band_metadata.json", input_dir)
+    bands = sorted(bands, key=lambda b: int(b.band_id))
+    number = np.array([int(b.band_id) for b in bands])
+    rows = []
+    for b in bands:
+        counts = np.bincount(read_band(b.path).ravel(), minlength=256)
+        counts[0] = 0  # DN 0 is no-data (none in the challenge capture)
+        cdf = np.cumsum(counts) / counts.sum()
+        present = np.flatnonzero(counts)
+        p1, p50, p99 = np.searchsorted(cdf, [0.01, 0.5, 0.99])
+        rows.append((present[0], p1, p50, p99, present[-1], counts[SATURATION_DN]))
+    lo, p1, med, p99, hi, saturated = np.array(rows).T
+
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(11, 8), sharex=True, height_ratios=[2, 1])
+    ax.vlines(number, lo, hi, color="0.7", lw=1.5, label="min to max")
+    ax.vlines(number, p1, p99, color="tab:blue", lw=5, label="1st to 99th percentile")
+    ax.plot(number, med, "o", color="white", mec="tab:blue", ms=4, label="median")
+    ax.axhline(SATURATION_DN, color="tab:red", ls="--", lw=1, label=f"saturation ({SATURATION_DN})")
+    hit = saturated > 0
+    if hit.any():
+        ax.text(
+            0.99, 0.97,
+            "saturated pixels: " + ", ".join(
+                f"band {n}: {k}" for n, k in zip(number[hit], saturated[hit], strict=True)
+            ),
+            transform=ax.transAxes, ha="right", va="top", fontsize=8, color="tab:red",
+        )  # fmt: skip
+    ax.set_ylabel("raw DN")
+    ax.set_ylim(90, 270)
+    ax.set_title("Raw DN range per band: the scene sits on a ~100 DN pedestal")
+    ax.legend(loc="upper left", bbox_to_anchor=(0.17, 0.92), fontsize=9)
+    ax.grid(alpha=0.3)
+
+    ax2.bar(number, hi - lo + 1, color="0.8", width=0.8, label="min to max")
+    ax2.bar(number, p99 - p1 + 1, color="tab:blue", width=0.5, label="1st to 99th percentile")
+    ax2.set_ylabel("DN levels used (of 256)")
+    ax2.set_xlabel("band number (metadata key; not monotonic in wavelength)")
+    ax2.legend(loc="upper left", bbox_to_anchor=(0.17, 1.0), fontsize=9)
+    ax2.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out / "dynamic_range_by_band.png", dpi=110)
+    plt.close(fig)
+
+
 def cloud_figure(rgb: np.ndarray, mask: np.ndarray, stats: dict, out: Path) -> None:
     """Cloud mask outline on the RGB composite, full frame and crops."""
     crops = [
@@ -359,6 +409,7 @@ def main() -> None:
     shift_vs_band_figure(reg, out)
     offset_figure(summary, out)
     offset_by_band_figures(summary, out)
+    dynamic_range_figure(args.input_dir, out)
     registration_figures(args.input_dir, sel, reg, out)
     print(f"Wrote figures to {out}")
 
