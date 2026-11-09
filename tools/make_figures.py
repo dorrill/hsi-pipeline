@@ -112,28 +112,55 @@ def rgb_figures(rgb: np.ndarray, sel: dict, out: Path) -> None:
     plt.close(fig)
 
 
-def registration_figures(input_dir: Path, sel: dict, reg_stats: dict, out: Path) -> None:
-    """Unregistered vs registered composite, and the R/B displacement fields."""
-    bands = load_metadata(input_dir / "band_metadata.json", input_dir)
-    ids = [b.band_id for b in bands]
-    order = [ids.index(sel["chosen"][c]) for c in ("R", "G", "B")]
-    # Offsets as the pipeline applies them (the repair needs every band's offset).
-    full = load_cube(bands)
-    full_valid, _ = validity_masks(full)
-    repaired, _ = check_offsets(full, bands, full_valid)
-    dn_all, valid = full[order], full_valid[order]
-    del full, full_valid
-    three = [replace(repaired[k], index=i) for i, k in enumerate(order)]
-    cube = apply_radiometric_correction(dn_all, three, valid)
-    destripe_columns(cube, dn_all == SATURATION_DN)
+def load_raw(input_dir: Path) -> tuple[np.ndarray, np.ndarray, list, list]:
+    """Raw DN cube, its validity, and the bands with metadata and repaired offsets.
 
-    single = {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}}
-    before = rgb_composite(cube, single, valid.all(axis=0))
+    Returns:
+        ``(n_bands, H, W)`` uint8 DN and bool validity, sorted by wavelength; the
+        metadata bands; the same bands with the offsets the pipeline applies.
+    """
+    bands = load_metadata(input_dir / "band_metadata.json", input_dir)
+    dn = load_cube(bands)
+    valid, _ = validity_masks(dn)
+    repaired, _ = check_offsets(dn, bands, valid)  # the repair needs every band's offset
+    return dn, valid, bands, repaired
+
+
+def rgb_bands(dn: np.ndarray, valid: np.ndarray, repaired: list, sel: dict) -> dict:
+    """The chosen R/G/B bands at three stages of the pipeline, in R, G, B order.
+
+    Returns:
+        ``corrected`` (gain/offset only), ``destriped``, ``registered`` (to G):
+        ``(3, H, W)`` float32 with NaN at no-data; ``valid`` and ``registered_valid``
+        ``(3, H, W)`` bool; ``fields``: the R and B displacement fields.
+    """
+    ids = [b.band_id for b in repaired]
+    order = [ids.index(sel["chosen"][c]) for c in ("R", "G", "B")]
+    dn3, valid3 = dn[order], valid[order]
+    three = [replace(repaired[k], index=i) for i, k in enumerate(order)]
+    corrected = apply_radiometric_correction(dn3, three, valid3)
+    cube = corrected.copy()
+    destripe_columns(cube, dn3 == SATURATION_DN)
     fields = {}
-    reg_cube, reg_valid = cube.copy(), valid.copy()
+    reg_cube, reg_valid = cube.copy(), valid3.copy()
     for i, c in ((0, "R"), (2, "B")):
-        reg_cube[i], reg_valid[i], fields[c], _ = register_band(cube[1], cube[i], valid[i])
-    after = rgb_composite(reg_cube, single, reg_valid.all(axis=0))
+        reg_cube[i], reg_valid[i], fields[c], _ = register_band(cube[1], cube[i], valid3[i])
+    return {
+        "corrected": corrected,
+        "destriped": cube,
+        "registered": reg_cube,
+        "valid": valid3,
+        "registered_valid": reg_valid,
+        "fields": fields,
+    }
+
+
+def registration_figures(data: dict, sel: dict, out: Path) -> None:
+    """Unregistered vs registered composite, and the R/B displacement fields."""
+    single = {"R": {0: 1.0}, "G": {1: 1.0}, "B": {2: 1.0}}
+    before = rgb_composite(data["destriped"], single, data["valid"].all(axis=0))
+    after = rgb_composite(data["registered"], single, data["registered_valid"].all(axis=0))
+    fields = data["fields"]
 
     fig, axes = plt.subplots(2, len(CROPS), figsize=(7 * len(CROPS), 14))
     for j, (title, r, c) in enumerate(CROPS):
@@ -306,6 +333,164 @@ def dynamic_range_figure(input_dir: Path, out: Path) -> None:
     plt.close(fig)
 
 
+def band_statistics_figure(
+    dn: np.ndarray, valid: np.ndarray, bands: list, repaired: list, out: Path
+) -> None:
+    """Scene mean and standard deviation of each band, in DN and in radiance, vs band number.
+
+    Radiance is ``gain * DN + offset`` before destriping, so its standard
+    deviation is exactly ``gain`` times the DN one. The error bars are the spread
+    of the scene (water, land, cloud), not noise. Writes ``band_statistics.png``.
+    """
+    number = np.array([int(b.band_id) for b in bands])
+    order = np.argsort(number)
+    number = number[order]
+    gain = np.array([bands[k].gain for k in order])
+    offset_meta = np.array([bands[k].offset for k in order])
+    offset = np.array([repaired[k].offset for k in order])
+    stats = np.array([
+        (d.mean(), d.std()) for d in (dn[k][valid[k]].astype(np.float64) for k in order)
+    ])  # fmt: skip
+    dn_mean, dn_std = stats.T
+    fixed = offset != offset_meta
+
+    fig, (ax, ax2, ax3) = plt.subplots(
+        3, 1, figsize=(11, 10.5), sharex=True, height_ratios=[1.3, 1.3, 1]
+    )
+    ax.errorbar(number, dn_mean, dn_std, fmt="o", ms=4, capsize=2, color="tab:blue")
+    ax.set_ylabel("raw DN")
+    ax.set_title("Scene mean +/- standard deviation per band (error bars: scene spread, not noise)")
+    ax.grid(alpha=0.3)
+
+    ax2.errorbar(
+        number, gain * dn_mean + offset, gain * dn_std, fmt="o", ms=4, capsize=2,
+        color="tab:blue", label="applied offsets",
+    )  # fmt: skip
+    ax2.plot(
+        number[fixed], (gain * dn_mean + offset_meta)[fixed], "o", ms=6, mfc="none",
+        mec="tab:orange", mew=1.5, label="metadata offsets (repaired bands)",
+    )  # fmt: skip
+    ax2.set_ylabel("radiance (gain * DN + offset)")
+    ax2.legend(fontsize=9, loc="lower left")
+    ax2.grid(alpha=0.3)
+
+    ax3.plot(number, gain, "s-", ms=3, lw=1, color="0.3", label="gain")
+    ax3.set_ylabel("gain")
+    ax3.set_xlabel("band number (metadata key; not monotonic in wavelength)")
+    ax3.grid(alpha=0.3)
+    twin = ax3.twinx()
+    twin.plot(number, offset, "^", ms=4, color="tab:blue", label="applied offset")
+    twin.plot(number[fixed], offset_meta[fixed], "^", ms=5, mfc="none", mec="tab:orange",
+              label="metadata offset")  # fmt: skip
+    twin.set_ylabel("offset (radiance units)")
+    lines = ax3.get_legend_handles_labels()
+    more = twin.get_legend_handles_labels()
+    ax3.legend(lines[0] + more[0], lines[1] + more[1], fontsize=9, loc="upper left")
+    fig.tight_layout()
+    fig.savefig(out / "band_statistics.png", dpi=110)
+    plt.close(fig)
+
+
+#: Fewest cloud pixels in a column for its cloud colour fraction to be plotted.
+MIN_CLOUD_PX_PER_COLUMN = 100
+
+
+def _column_fractions(cube: np.ndarray, use: np.ndarray, min_px: int = 1) -> np.ndarray:
+    """Share of each band in the sum of the column-mean radiances, ``(3, W)``.
+
+    Columns with fewer than ``min_px`` usable pixels are NaN.
+    """
+    n = use.sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        means = np.where(use[None], cube, 0.0).sum(axis=1) / n
+        frac = means / means.sum(axis=0)
+    frac[:, n < min_px] = np.nan
+    return frac
+
+
+def rgb_fraction_figure(data: dict, mask: np.ndarray, sel: dict, out: Path) -> None:
+    """Fraction of the R+G+B signal in each colour, per column.
+
+    Over the whole scene the fractions follow what each column sees (water, land,
+    cloud). Cloud has a nearly flat spectrum, so a cross-track trend in its
+    fractions is a column-dependent relative calibration error. Writes
+    ``rgb_fraction_vs_column.png``.
+    """
+    footprint = data["registered_valid"].all(axis=0)
+    cloud = mask.astype(bool) & footprint
+    raw = _column_fractions(data["corrected"], data["valid"].all(axis=0))
+    final = _column_fractions(data["registered"], footprint)
+    fractions = [
+        ("all valid pixels", final, raw),
+        ("cloud-free pixels", _column_fractions(data["registered"], footprint & ~cloud), None),
+        (
+            f"cloud pixels (columns with >= {MIN_CLOUD_PX_PER_COLUMN})",
+            _column_fractions(data["registered"], cloud, MIN_CLOUD_PX_PER_COLUMN),
+            None,
+        ),
+    ]
+    col = np.arange(mask.shape[1])
+    fig, axes = plt.subplots(len(fractions) + 1, 1, figsize=(13, 12), sharex=True,
+                             height_ratios=[1, 1, 1, 0.5])  # fmt: skip
+    for ax, (title, frac, before) in zip(axes, fractions, strict=False):
+        for i, c in enumerate(("R", "G", "B")):
+            if before is not None:
+                ax.plot(col, before[i], color=COLOURS[c], lw=0.5, alpha=0.35)
+            ax.plot(col, frac[i], color=COLOURS[c], lw=0.9,
+                    label=f"{c} (band {sel['chosen'][c]}): {np.nanmean(frac[i]):.3f}")  # fmt: skip
+        ax.set_ylabel("fraction of R+G+B")
+        ax.set_title(title)
+        ax.legend(fontsize=8, loc="upper right", ncol=3)
+        ax.grid(alpha=0.3)
+    axes[0].set_title("all valid pixels (faint: gain/offset only; solid: destriped and registered)")
+    axes[-1].plot(col, cloud.sum(axis=0), color="0.4", lw=0.8, label="cloud")
+    axes[-1].plot(col, footprint.sum(axis=0), color="0.7", lw=0.8, label="valid")
+    axes[-1].set_ylabel("pixels per column")
+    axes[-1].set_xlabel("column (cross-track)")
+    axes[-1].legend(fontsize=8, loc="center right")
+    axes[-1].grid(alpha=0.3)
+    fig.suptitle("Share of each colour in the RGB signal across the swath (column-mean radiance)")
+    fig.tight_layout()
+    fig.savefig(out / "rgb_fraction_vs_column.png", dpi=100)
+    plt.close(fig)
+
+
+def cross_track_figure(dn: np.ndarray, valid: np.ndarray, repaired: list, out: Path) -> None:
+    """Column profile of every band relative to all bands, as a band x column image.
+
+    Each band's column-mean radiance (gain/offset only, no destriping) is divided
+    by its frame mean; dividing that by the median profile over the bands
+    removes what all bands share (the scene's brightness across the swath). What
+    is left is spectral: the scene's colour changing across the swath, and
+    detector effects that differ between bands (stripes, gain trends). Writes
+    ``cross_track_by_band.png``.
+    """
+    gain = np.array([b.gain for b in repaired])[:, None]
+    offset = np.array([b.offset for b in repaired])[:, None]
+    n = valid.sum(axis=1)
+    dn_mean = np.where(valid, dn, 0).sum(axis=1, dtype=np.float64) / n
+    profile = gain * dn_mean + offset  # exact: the correction is linear
+    profile /= profile.mean(axis=1, keepdims=True)
+    common = np.median(profile, axis=0)
+    rel = 100 * (profile / common - 1)
+    lim = np.percentile(np.abs(rel), 99)
+
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(13, 10), sharex=True, height_ratios=[3, 1])
+    im = ax.imshow(rel, aspect="auto", cmap="RdBu_r", vmin=-lim, vmax=lim, interpolation="nearest")
+    ax.set_yticks(range(len(repaired)))
+    ax.set_yticklabels([f"{b.band_id} ({b.wavelength_nm:.0f})" for b in repaired], fontsize=6)
+    ax.set_ylabel("band (wavelength nm), by wavelength")
+    ax.set_title("Each band's column profile relative to the median band (%)")
+    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.01, label="%")
+    ax2.plot(common, color="0.3", lw=0.8)
+    ax2.set_ylabel("median profile\n(/ frame mean)")
+    ax2.set_xlabel("column (cross-track)")
+    ax2.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out / "cross_track_by_band.png", dpi=100)
+    plt.close(fig)
+
+
 def cloud_figure(rgb: np.ndarray, mask: np.ndarray, stats: dict, out: Path) -> None:
     """Cloud mask outline on the RGB composite, full frame and crops."""
     crops = [
@@ -410,7 +595,13 @@ def main() -> None:
     offset_figure(summary, out)
     offset_by_band_figures(summary, out)
     dynamic_range_figure(args.input_dir, out)
-    registration_figures(args.input_dir, sel, reg, out)
+    dn, valid, bands, repaired = load_raw(args.input_dir)
+    band_statistics_figure(dn, valid, bands, repaired, out)
+    cross_track_figure(dn, valid, repaired, out)
+    data = rgb_bands(dn, valid, repaired, sel)
+    del dn, valid
+    registration_figures(data, sel, out)
+    rgb_fraction_figure(data, mask, sel, out)
     print(f"Wrote figures to {out}")
 
 
